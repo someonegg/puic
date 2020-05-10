@@ -1,0 +1,23 @@
+diff --git a/quic/core/quic_connection.cc b/quic/core/quic_connection.cc
+index 7cc93a3..b091e93 100644
+--- a/quic/core/quic_connection.cc
++++ b/quic/core/quic_connection.cc
+@@ -1361,6 +1361,7 @@ void QuicConnection::ProcessUdpPacket(const QuicSocketAddress& self_address,
+ }
+ 
+ void QuicConnection::OnBlockedWriterCanWrite() {
++  writer_->SetWritable();
+   OnCanWrite();
+ }
+ 
+@@ -2540,6 +2541,10 @@ bool QuicConnection::SendConnectivityProbingPacket(
+     return false;
+   }
+ 
++  if (result.status == WRITE_STATUS_BLOCKED && probing_writer == writer_) {
++    visitor_->OnWriteBlocked();
++  }
++
+   return true;
+ }
+ 

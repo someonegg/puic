@@ -1,0 +1,3084 @@
+diff --git a/base/host_port_pair.cc b/base/host_port_pair.cc
+index ec82484..a0e3a25 100644
+--- a/base/host_port_pair.cc
++++ b/base/host_port_pair.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "net/base/host_port_pair.h"
+ 
++#include <limits>
++
+ #include "base/logging.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_split.h"
+@@ -12,7 +14,6 @@
+ #include "base/trace_event/memory_usage_estimator.h"
+ #include "net/base/ip_endpoint.h"
+ #include "net/base/parse_number.h"
+-#include "net/base/port_util.h"
+ #include "url/gurl.h"
+ 
+ namespace net {
+@@ -42,7 +43,7 @@ HostPortPair HostPortPair::FromString(const std::string& str) {
+   int port;
+   if (!ParseInt32(key_port[1], ParseIntFormat::NON_NEGATIVE, &port))
+     return HostPortPair();
+-  if (!IsPortValid(port))
++  if (!(port >= 0 && port <= std::numeric_limits<uint16_t>::max()))
+     return HostPortPair();
+   HostPortPair host_port_pair;
+   host_port_pair.set_host(key_port[0].as_string());
+diff --git a/base/io_buffer.cc b/base/io_buffer.cc
+index 6337be5..7a1d15a 100644
+--- a/base/io_buffer.cc
++++ b/base/io_buffer.cc
+@@ -166,17 +166,6 @@ GrowableIOBuffer::~GrowableIOBuffer() {
+   data_ = NULL;
+ }
+ 
+-PickledIOBuffer::PickledIOBuffer() : IOBuffer() {
+-}
+-
+-void PickledIOBuffer::Done() {
+-  data_ = const_cast<char*>(static_cast<const char*>(pickle_.data()));
+-}
+-
+-PickledIOBuffer::~PickledIOBuffer() {
+-  data_ = NULL;
+-}
+-
+ WrappedIOBuffer::WrappedIOBuffer(const char* data)
+     : IOBuffer(const_cast<char*>(data)) {
+ }
+diff --git a/base/io_buffer.h b/base/io_buffer.h
+index 62240aa..affbbf4 100644
+--- a/base/io_buffer.h
++++ b/base/io_buffer.h
+@@ -12,7 +12,6 @@
+ 
+ #include "base/memory/free_deleter.h"
+ #include "base/memory/ref_counted.h"
+-#include "base/pickle.h"
+ #include "net/base/net_export.h"
+ 
+ namespace net {
+@@ -73,7 +72,7 @@ namespace net {
+ // and hence the buffer it was reading into must remain alive. Using
+ // reference counting we can add a reference to the IOBuffer and make sure
+ // it is not destroyed until after the synchronous operation has completed.
+-class NET_EXPORT IOBuffer : public base::RefCountedThreadSafe<IOBuffer> {
++class NET_EXPORT IOBuffer : public base::RefCounted<IOBuffer> {
+  public:
+   IOBuffer();
+ 
+@@ -84,7 +83,7 @@ class NET_EXPORT IOBuffer : public base::RefCountedThreadSafe<IOBuffer> {
+   char* data() const { return data_; }
+ 
+  protected:
+-  friend class base::RefCountedThreadSafe<IOBuffer>;
++  friend class base::RefCounted<IOBuffer>;
+ 
+   // Only allow derived classes to specify data_.
+   // In all other cases, we own data_, and must delete it at destruction time.
+@@ -222,24 +221,6 @@ class NET_EXPORT GrowableIOBuffer : public IOBuffer {
+   int offset_;
+ };
+ 
+-// This versions allows a pickle to be used as the storage for a write-style
+-// operation, avoiding an extra data copy.
+-class NET_EXPORT PickledIOBuffer : public IOBuffer {
+- public:
+-  PickledIOBuffer();
+-
+-  base::Pickle* pickle() { return &pickle_; }
+-
+-  // Signals that we are done writing to the pickle and we can use it for a
+-  // write-style IO operation.
+-  void Done();
+-
+- private:
+-  ~PickledIOBuffer() override;
+-
+-  base::Pickle pickle_;
+-};
+-
+ // This class allows the creation of a temporary IOBuffer that doesn't really
+ // own the underlying buffer. Please use this class only as a last resort.
+ // A good example is the buffer for a synchronous operation, where we can be
+diff --git a/base/net_errors.cc b/base/net_errors.cc
+index 226307a..c26ea84 100644
+--- a/base/net_errors.cc
++++ b/base/net_errors.cc
+@@ -58,44 +58,4 @@ bool IsDnsError(int error) {
+           error == ERR_NAME_RESOLUTION_FAILED);
+ }
+ 
+-Error FileErrorToNetError(base::File::Error file_error) {
+-  switch (file_error) {
+-    case base::File::FILE_OK:
+-      return OK;
+-    case base::File::FILE_ERROR_EXISTS:
+-      return ERR_FILE_EXISTS;
+-    case base::File::FILE_ERROR_NOT_FOUND:
+-      return ERR_FILE_NOT_FOUND;
+-    case base::File::FILE_ERROR_ACCESS_DENIED:
+-      return ERR_ACCESS_DENIED;
+-    case base::File::FILE_ERROR_NO_MEMORY:
+-      return ERR_OUT_OF_MEMORY;
+-    case base::File::FILE_ERROR_NO_SPACE:
+-      return ERR_FILE_NO_SPACE;
+-    case base::File::FILE_ERROR_INVALID_OPERATION:
+-      return ERR_INVALID_ARGUMENT;
+-    case base::File::FILE_ERROR_ABORT:
+-      return ERR_ABORTED;
+-    case base::File::FILE_ERROR_INVALID_URL:
+-      return ERR_INVALID_URL;
+-    case base::File::FILE_ERROR_TOO_MANY_OPENED:
+-      return ERR_INSUFFICIENT_RESOURCES;
+-    case base::File::FILE_ERROR_SECURITY:
+-      return ERR_ACCESS_DENIED;
+-    case base::File::FILE_ERROR_MAX:
+-      NOTREACHED();
+-    // fallthrough
+-    case base::File::FILE_ERROR_NOT_A_DIRECTORY:
+-    case base::File::FILE_ERROR_NOT_A_FILE:
+-    case base::File::FILE_ERROR_NOT_EMPTY:
+-    case base::File::FILE_ERROR_IO:
+-    case base::File::FILE_ERROR_IN_USE:
+-    // No good mappings for these, so just fallthrough to generic fail.
+-    case base::File::FILE_ERROR_FAILED:
+-      return ERR_FAILED;
+-  }
+-  NOTREACHED();
+-  return ERR_FAILED;
+-}
+-
+ }  // namespace net
+diff --git a/base/net_errors.h b/base/net_errors.h
+index 8fe976d..58833d3 100644
+--- a/base/net_errors.h
++++ b/base/net_errors.h
+@@ -8,7 +8,6 @@
+ #include <string>
+ #include <vector>
+ 
+-#include "base/files/file.h"
+ #include "base/logging.h"
+ #include "net/base/net_export.h"
+ 
+@@ -50,9 +49,6 @@ NET_EXPORT bool IsDnsError(int error);
+ // Map system error code to Error.
+ NET_EXPORT Error MapSystemError(logging::SystemErrorCode os_error);
+ 
+-// A convenient function to translate file error to net error code.
+-NET_EXPORT Error FileErrorToNetError(base::File::Error file_error);
+-
+ }  // namespace net
+ 
+ #endif  // NET_BASE_NET_ERRORS_H__
+diff --git a/quic/core/crypto/aead_base_decrypter.cc b/quic/core/crypto/aead_base_decrypter.cc
+index c036441..b1b9a13 100644
+--- a/quic/core/crypto/aead_base_decrypter.cc
++++ b/quic/core/crypto/aead_base_decrypter.cc
+@@ -10,8 +10,8 @@
+ #include "net/quic/platform/api/quic_arraysize.h"
+ #include "net/quic/platform/api/quic_bug_tracker.h"
+ #include "net/quic/platform/api/quic_logging.h"
+-#include "third_party/boringssl/src/include/openssl/err.h"
+-#include "third_party/boringssl/src/include/openssl/evp.h"
++#include "third_party/boringssl/include/openssl/err.h"
++#include "third_party/boringssl/include/openssl/evp.h"
+ 
+ using std::string;
+ 
+diff --git a/quic/core/crypto/aead_base_encrypter.cc b/quic/core/crypto/aead_base_encrypter.cc
+index 50a6616..3343d4a 100644
+--- a/quic/core/crypto/aead_base_encrypter.cc
++++ b/quic/core/crypto/aead_base_encrypter.cc
+@@ -11,8 +11,8 @@
+ #include "net/quic/platform/api/quic_arraysize.h"
+ #include "net/quic/platform/api/quic_bug_tracker.h"
+ #include "net/quic/platform/api/quic_logging.h"
+-#include "third_party/boringssl/src/include/openssl/err.h"
+-#include "third_party/boringssl/src/include/openssl/evp.h"
++#include "third_party/boringssl/include/openssl/err.h"
++#include "third_party/boringssl/include/openssl/evp.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/aes_128_gcm_12_decrypter.cc b/quic/core/crypto/aes_128_gcm_12_decrypter.cc
+index a8910b1..8064fca 100644
+--- a/quic/core/crypto/aes_128_gcm_12_decrypter.cc
++++ b/quic/core/crypto/aes_128_gcm_12_decrypter.cc
+@@ -4,8 +4,8 @@
+ 
+ #include "net/quic/core/crypto/aes_128_gcm_12_decrypter.h"
+ 
+-#include "third_party/boringssl/src/include/openssl/aead.h"
+-#include "third_party/boringssl/src/include/openssl/tls1.h"
++#include "third_party/boringssl/include/openssl/aead.h"
++#include "third_party/boringssl/include/openssl/tls1.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/aes_128_gcm_12_encrypter.cc b/quic/core/crypto/aes_128_gcm_12_encrypter.cc
+index eb334ab..8db08b5 100644
+--- a/quic/core/crypto/aes_128_gcm_12_encrypter.cc
++++ b/quic/core/crypto/aes_128_gcm_12_encrypter.cc
+@@ -4,7 +4,7 @@
+ 
+ #include "net/quic/core/crypto/aes_128_gcm_12_encrypter.h"
+ 
+-#include "third_party/boringssl/src/include/openssl/evp.h"
++#include "third_party/boringssl/include/openssl/evp.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/aes_128_gcm_decrypter.cc b/quic/core/crypto/aes_128_gcm_decrypter.cc
+index b25b1a1..6925d79 100644
+--- a/quic/core/crypto/aes_128_gcm_decrypter.cc
++++ b/quic/core/crypto/aes_128_gcm_decrypter.cc
+@@ -6,8 +6,8 @@
+ 
+ #include "net/quic/platform/api/quic_flag_utils.h"
+ #include "net/quic/platform/api/quic_flags.h"
+-#include "third_party/boringssl/src/include/openssl/aead.h"
+-#include "third_party/boringssl/src/include/openssl/tls1.h"
++#include "third_party/boringssl/include/openssl/aead.h"
++#include "third_party/boringssl/include/openssl/tls1.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/aes_128_gcm_encrypter.cc b/quic/core/crypto/aes_128_gcm_encrypter.cc
+index dd5355e..50daec2 100644
+--- a/quic/core/crypto/aes_128_gcm_encrypter.cc
++++ b/quic/core/crypto/aes_128_gcm_encrypter.cc
+@@ -4,7 +4,7 @@
+ 
+ #include "net/quic/core/crypto/aes_128_gcm_encrypter.h"
+ 
+-#include "third_party/boringssl/src/include/openssl/evp.h"
++#include "third_party/boringssl/include/openssl/evp.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/aes_256_gcm_decrypter.cc b/quic/core/crypto/aes_256_gcm_decrypter.cc
+index 7350089..dcda6fd 100644
+--- a/quic/core/crypto/aes_256_gcm_decrypter.cc
++++ b/quic/core/crypto/aes_256_gcm_decrypter.cc
+@@ -6,8 +6,8 @@
+ 
+ #include "net/quic/platform/api/quic_flag_utils.h"
+ #include "net/quic/platform/api/quic_flags.h"
+-#include "third_party/boringssl/src/include/openssl/aead.h"
+-#include "third_party/boringssl/src/include/openssl/tls1.h"
++#include "third_party/boringssl/include/openssl/aead.h"
++#include "third_party/boringssl/include/openssl/tls1.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/aes_256_gcm_encrypter.cc b/quic/core/crypto/aes_256_gcm_encrypter.cc
+index 6a5986f..219d93b 100644
+--- a/quic/core/crypto/aes_256_gcm_encrypter.cc
++++ b/quic/core/crypto/aes_256_gcm_encrypter.cc
+@@ -4,7 +4,7 @@
+ 
+ #include "net/quic/core/crypto/aes_256_gcm_encrypter.h"
+ 
+-#include "third_party/boringssl/src/include/openssl/evp.h"
++#include "third_party/boringssl/include/openssl/evp.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/chacha20_poly1305_decrypter.cc b/quic/core/crypto/chacha20_poly1305_decrypter.cc
+index ec37f86..d9e7ce9 100644
+--- a/quic/core/crypto/chacha20_poly1305_decrypter.cc
++++ b/quic/core/crypto/chacha20_poly1305_decrypter.cc
+@@ -4,8 +4,8 @@
+ 
+ #include "net/quic/core/crypto/chacha20_poly1305_decrypter.h"
+ 
+-#include "third_party/boringssl/src/include/openssl/aead.h"
+-#include "third_party/boringssl/src/include/openssl/tls1.h"
++#include "third_party/boringssl/include/openssl/aead.h"
++#include "third_party/boringssl/include/openssl/tls1.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/chacha20_poly1305_encrypter.cc b/quic/core/crypto/chacha20_poly1305_encrypter.cc
+index 7e429a1..b55470b 100644
+--- a/quic/core/crypto/chacha20_poly1305_encrypter.cc
++++ b/quic/core/crypto/chacha20_poly1305_encrypter.cc
+@@ -4,7 +4,7 @@
+ 
+ #include "net/quic/core/crypto/chacha20_poly1305_encrypter.h"
+ 
+-#include "third_party/boringssl/src/include/openssl/evp.h"
++#include "third_party/boringssl/include/openssl/evp.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/chacha20_poly1305_tls_decrypter.cc b/quic/core/crypto/chacha20_poly1305_tls_decrypter.cc
+index 7034581..7fda38e 100644
+--- a/quic/core/crypto/chacha20_poly1305_tls_decrypter.cc
++++ b/quic/core/crypto/chacha20_poly1305_tls_decrypter.cc
+@@ -6,8 +6,8 @@
+ 
+ #include "net/quic/platform/api/quic_flag_utils.h"
+ #include "net/quic/platform/api/quic_flags.h"
+-#include "third_party/boringssl/src/include/openssl/aead.h"
+-#include "third_party/boringssl/src/include/openssl/tls1.h"
++#include "third_party/boringssl/include/openssl/aead.h"
++#include "third_party/boringssl/include/openssl/tls1.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/chacha20_poly1305_tls_encrypter.cc b/quic/core/crypto/chacha20_poly1305_tls_encrypter.cc
+index 9d8a208..1dcbfbe 100644
+--- a/quic/core/crypto/chacha20_poly1305_tls_encrypter.cc
++++ b/quic/core/crypto/chacha20_poly1305_tls_encrypter.cc
+@@ -4,7 +4,7 @@
+ 
+ #include "net/quic/core/crypto/chacha20_poly1305_tls_encrypter.h"
+ 
+-#include "third_party/boringssl/src/include/openssl/evp.h"
++#include "third_party/boringssl/include/openssl/evp.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/channel_id.cc b/quic/core/crypto/channel_id.cc
+index df4441f..f2ffc70 100644
+--- a/quic/core/crypto/channel_id.cc
++++ b/quic/core/crypto/channel_id.cc
+@@ -6,11 +6,11 @@
+ 
+ #include <cstdint>
+ 
+-#include "third_party/boringssl/src/include/openssl/bn.h"
+-#include "third_party/boringssl/src/include/openssl/ec.h"
+-#include "third_party/boringssl/src/include/openssl/ecdsa.h"
+-#include "third_party/boringssl/src/include/openssl/nid.h"
+-#include "third_party/boringssl/src/include/openssl/sha.h"
++#include "third_party/boringssl/include/openssl/bn.h"
++#include "third_party/boringssl/include/openssl/ec.h"
++#include "third_party/boringssl/include/openssl/ecdsa.h"
++#include "third_party/boringssl/include/openssl/nid.h"
++#include "third_party/boringssl/include/openssl/sha.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/common_cert_set.cc b/quic/core/crypto/common_cert_set.cc
+index 83c3e97..bc4b198 100644
+--- a/quic/core/crypto/common_cert_set.cc
++++ b/quic/core/crypto/common_cert_set.cc
+@@ -7,7 +7,6 @@
+ #include <cstddef>
+ 
+ #include "base/macros.h"
+-#include "base/memory/singleton.h"
+ #include "net/quic/core/quic_utils.h"
+ #include "net/quic/platform/api/quic_arraysize.h"
+ 
+@@ -143,17 +142,19 @@ class CommonCertSetsQUIC : public CommonCertSets {
+   }
+ 
+   static CommonCertSetsQUIC* GetInstance() {
+-    return base::Singleton<CommonCertSetsQUIC>::get();
++    return &s_common_certsets_quic;
+   }
++  static CommonCertSetsQUIC s_common_certsets_quic;
+ 
+  private:
+   CommonCertSetsQUIC() {}
+   ~CommonCertSetsQUIC() override {}
+ 
+-  friend struct base::DefaultSingletonTraits<CommonCertSetsQUIC>;
+   DISALLOW_COPY_AND_ASSIGN(CommonCertSetsQUIC);
+ };
+ 
++CommonCertSetsQUIC CommonCertSetsQUIC::s_common_certsets_quic;
++
+ }  // anonymous namespace
+ 
+ CommonCertSets::~CommonCertSets() {}
+diff --git a/quic/core/crypto/crypto_secret_boxer.cc b/quic/core/crypto/crypto_secret_boxer.cc
+index 65691d2..7fe960b 100644
+--- a/quic/core/crypto/crypto_secret_boxer.cc
++++ b/quic/core/crypto/crypto_secret_boxer.cc
+@@ -11,7 +11,7 @@
+ #include "net/quic/core/crypto/quic_decrypter.h"
+ #include "net/quic/core/crypto/quic_encrypter.h"
+ #include "net/quic/core/crypto/quic_random.h"
+-#include "third_party/boringssl/src/include/openssl/aead.h"
++#include "third_party/boringssl/include/openssl/aead.h"
+ 
+ using std::string;
+ 
+@@ -59,7 +59,6 @@ void CryptoSecretBoxer::SetKeys(const std::vector<string>& keys) {
+     new_state->ctxs.push_back(std::move(ctx));
+   }
+ 
+-  QuicWriterMutexLock l(&lock_);
+   state_ = std::move(new_state);
+ }
+ 
+@@ -84,7 +83,6 @@ string CryptoSecretBoxer::Box(QuicRandom* rand,
+ 
+   size_t bytes_written;
+   {
+-    QuicReaderMutexLock l(&lock_);
+     if (!EVP_AEAD_CTX_seal(state_->ctxs[0].get(), out, &bytes_written, out_len,
+                            nonce, kBoxNonceSize,
+                            reinterpret_cast<const uint8_t*>(plaintext.data()),
+@@ -114,7 +112,6 @@ bool CryptoSecretBoxer::Unbox(QuicStringPiece in_ciphertext,
+   uint8_t* out_data = reinterpret_cast<uint8_t*>(
+       base::WriteInto(out_storage, ciphertext_len + 1));
+ 
+-  QuicReaderMutexLock l(&lock_);
+   for (const bssl::UniquePtr<EVP_AEAD_CTX>& ctx : state_->ctxs) {
+     size_t bytes_written;
+     if (EVP_AEAD_CTX_open(ctx.get(), out_data, &bytes_written, ciphertext_len,
+diff --git a/quic/core/crypto/crypto_secret_boxer.h b/quic/core/crypto/crypto_secret_boxer.h
+index f838e0b..1b488e6 100644
+--- a/quic/core/crypto/crypto_secret_boxer.h
++++ b/quic/core/crypto/crypto_secret_boxer.h
+@@ -12,7 +12,6 @@
+ 
+ #include "base/macros.h"
+ #include "net/quic/platform/api/quic_export.h"
+-#include "net/quic/platform/api/quic_mutex.h"
+ #include "net/quic/platform/api/quic_string_piece.h"
+ 
+ namespace net {
+@@ -20,8 +19,7 @@ namespace net {
+ class QuicRandom;
+ 
+ // CryptoSecretBoxer encrypts small chunks of plaintext (called 'boxing') and
+-// then, later, can authenticate+decrypt the resulting boxes. This object is
+-// thread-safe.
++// then, later, can authenticate+decrypt the resulting boxes.
+ class QUIC_EXPORT_PRIVATE CryptoSecretBoxer {
+  public:
+   CryptoSecretBoxer();
+@@ -54,11 +52,9 @@ class QUIC_EXPORT_PRIVATE CryptoSecretBoxer {
+  private:
+   struct State;
+ 
+-  mutable QuicMutex lock_;
+-
+   // state_ is an opaque pointer to whatever additional state the concrete
+   // implementation of CryptoSecretBoxer requires.
+-  std::unique_ptr<State> state_ GUARDED_BY(lock_);
++  std::unique_ptr<State> state_;
+ 
+   DISALLOW_COPY_AND_ASSIGN(CryptoSecretBoxer);
+ };
+diff --git a/quic/core/crypto/crypto_utils.cc b/quic/core/crypto/crypto_utils.cc
+index 6266834..76389d0 100644
+--- a/quic/core/crypto/crypto_utils.cc
++++ b/quic/core/crypto/crypto_utils.cc
+@@ -17,9 +17,9 @@
+ #include "net/quic/platform/api/quic_arraysize.h"
+ #include "net/quic/platform/api/quic_bug_tracker.h"
+ #include "net/quic/platform/api/quic_logging.h"
+-#include "third_party/boringssl/src/include/openssl/bytestring.h"
+-#include "third_party/boringssl/src/include/openssl/hkdf.h"
+-#include "third_party/boringssl/src/include/openssl/sha.h"
++#include "third_party/boringssl/include/openssl/bytestring.h"
++#include "third_party/boringssl/include/openssl/hkdf.h"
++#include "third_party/boringssl/include/openssl/sha.h"
+ 
+ using std::string;
+ 
+diff --git a/quic/core/crypto/crypto_utils.h b/quic/core/crypto/crypto_utils.h
+index ca42d90..4275008 100644
+--- a/quic/core/crypto/crypto_utils.h
++++ b/quic/core/crypto/crypto_utils.h
+@@ -19,7 +19,7 @@
+ #include "net/quic/core/quic_time.h"
+ #include "net/quic/platform/api/quic_export.h"
+ #include "net/quic/platform/api/quic_string_piece.h"
+-#include "third_party/boringssl/src/include/openssl/evp.h"
++#include "third_party/boringssl/include/openssl/evp.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/curve25519_key_exchange.cc b/quic/core/crypto/curve25519_key_exchange.cc
+index 7a8dbce..ebc2f95 100644
+--- a/quic/core/crypto/curve25519_key_exchange.cc
++++ b/quic/core/crypto/curve25519_key_exchange.cc
+@@ -7,7 +7,7 @@
+ #include <cstdint>
+ 
+ #include "net/quic/core/crypto/quic_random.h"
+-#include "third_party/boringssl/src/include/openssl/curve25519.h"
++#include "third_party/boringssl/include/openssl/curve25519.h"
+ 
+ using std::string;
+ 
+diff --git a/quic/core/crypto/p256_key_exchange.cc b/quic/core/crypto/p256_key_exchange.cc
+index 09cff16..16cb342 100644
+--- a/quic/core/crypto/p256_key_exchange.cc
++++ b/quic/core/crypto/p256_key_exchange.cc
+@@ -10,10 +10,10 @@
+ #include <utility>
+ 
+ #include "net/quic/platform/api/quic_logging.h"
+-#include "third_party/boringssl/src/include/openssl/ec.h"
+-#include "third_party/boringssl/src/include/openssl/ecdh.h"
+-#include "third_party/boringssl/src/include/openssl/err.h"
+-#include "third_party/boringssl/src/include/openssl/evp.h"
++#include "third_party/boringssl/include/openssl/ec.h"
++#include "third_party/boringssl/include/openssl/ecdh.h"
++#include "third_party/boringssl/include/openssl/err.h"
++#include "third_party/boringssl/include/openssl/evp.h"
+ 
+ using std::string;
+ 
+diff --git a/quic/core/crypto/p256_key_exchange.h b/quic/core/crypto/p256_key_exchange.h
+index c742a82..6c1a82b 100644
+--- a/quic/core/crypto/p256_key_exchange.h
++++ b/quic/core/crypto/p256_key_exchange.h
+@@ -12,7 +12,7 @@
+ #include "net/quic/core/crypto/key_exchange.h"
+ #include "net/quic/platform/api/quic_export.h"
+ #include "net/quic/platform/api/quic_string_piece.h"
+-#include "third_party/boringssl/src/include/openssl/base.h"
++#include "third_party/boringssl/include/openssl/base.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/quic_crypto_client_config.cc b/quic/core/crypto/quic_crypto_client_config.cc
+index 875b42d..0d0eac4 100644
+--- a/quic/core/crypto/quic_crypto_client_config.cc
++++ b/quic/core/crypto/quic_crypto_client_config.cc
+@@ -7,7 +7,6 @@
+ #include <algorithm>
+ #include <memory>
+ 
+-#include "base/metrics/histogram_macros.h"
+ #include "net/quic/core/crypto/cert_compressor.h"
+ #include "net/quic/core/crypto/chacha20_poly1305_encrypter.h"
+ #include "net/quic/core/crypto/channel_id.h"
+@@ -24,7 +23,6 @@
+ #include "net/quic/platform/api/quic_arraysize.h"
+ #include "net/quic/platform/api/quic_bug_tracker.h"
+ #include "net/quic/platform/api/quic_endian.h"
+-#include "net/quic/platform/api/quic_hostname_utils.h"
+ #include "net/quic/platform/api/quic_logging.h"
+ #include "net/quic/platform/api/quic_map_util.h"
+ #include "net/quic/platform/api/quic_ptr_util.h"
+@@ -34,27 +32,6 @@ using std::string;
+ 
+ namespace net {
+ 
+-namespace {
+-
+-// Tracks the reason (the state of the server config) for sending inchoate
+-// ClientHello to the server.
+-void RecordInchoateClientHelloReason(
+-    QuicCryptoClientConfig::CachedState::ServerConfigState state) {
+-  UMA_HISTOGRAM_ENUMERATION(
+-      "Net.QuicInchoateClientHelloReason", state,
+-      QuicCryptoClientConfig::CachedState::SERVER_CONFIG_COUNT);
+-}
+-
+-// Tracks the state of the QUIC server information loaded from the disk cache.
+-void RecordDiskCacheServerConfigState(
+-    QuicCryptoClientConfig::CachedState::ServerConfigState state) {
+-  UMA_HISTOGRAM_ENUMERATION(
+-      "Net.QuicServerInfo.DiskCacheState", state,
+-      QuicCryptoClientConfig::CachedState::SERVER_CONFIG_COUNT);
+-}
+-
+-}  // namespace
+-
+ QuicCryptoClientConfig::QuicCryptoClientConfig(
+     std::unique_ptr<ProofVerifier> proof_verifier)
+     : proof_verifier_(std::move(proof_verifier)) {
+@@ -73,12 +50,10 @@ QuicCryptoClientConfig::CachedState::~CachedState() {}
+ 
+ bool QuicCryptoClientConfig::CachedState::IsComplete(QuicWallTime now) const {
+   if (server_config_.empty()) {
+-    RecordInchoateClientHelloReason(SERVER_CONFIG_EMPTY);
+     return false;
+   }
+ 
+   if (!server_config_valid_) {
+-    RecordInchoateClientHelloReason(SERVER_CONFIG_INVALID);
+     return false;
+   }
+ 
+@@ -86,7 +61,6 @@ bool QuicCryptoClientConfig::CachedState::IsComplete(QuicWallTime now) const {
+   if (!scfg) {
+     // Should be impossible short of cache corruption.
+     DCHECK(false);
+-    RecordInchoateClientHelloReason(SERVER_CONFIG_CORRUPTED);
+     return false;
+   }
+ 
+@@ -94,12 +68,6 @@ bool QuicCryptoClientConfig::CachedState::IsComplete(QuicWallTime now) const {
+     return true;
+   }
+ 
+-  UMA_HISTOGRAM_CUSTOM_TIMES(
+-      "Net.QuicClientHelloServerConfig.InvalidDuration",
+-      base::TimeDelta::FromSeconds(now.ToUNIXSeconds() -
+-                                   expiration_time_.ToUNIXSeconds()),
+-      base::TimeDelta::FromMinutes(1), base::TimeDelta::FromDays(20), 50);
+-  RecordInchoateClientHelloReason(SERVER_CONFIG_EXPIRED);
+   return false;
+ }
+ 
+@@ -272,14 +240,12 @@ bool QuicCryptoClientConfig::CachedState::Initialize(
+   DCHECK(server_config_.empty());
+ 
+   if (server_config.empty()) {
+-    RecordDiskCacheServerConfigState(SERVER_CONFIG_EMPTY);
+     return false;
+   }
+ 
+   string error_details;
+   ServerConfigState state =
+       SetServerConfig(server_config, now, expiration_time, &error_details);
+-  RecordDiskCacheServerConfigState(state);
+   if (state != SERVER_CONFIG_VALID) {
+     QUIC_DVLOG(1) << "SetServerConfig failed with " << error_details;
+     return false;
+@@ -406,10 +372,7 @@ QuicCryptoClientConfig::CachedState* QuicCryptoClientConfig::LookupOrCreate(
+ 
+   CachedState* cached = new CachedState;
+   cached_states_.insert(std::make_pair(server_id, QuicWrapUnique(cached)));
+-  bool cache_populated = PopulateFromCanonicalConfig(server_id, cached);
+-  UMA_HISTOGRAM_BOOLEAN(
+-      "Net.QuicCryptoClientConfig.PopulatedFromCanonicalConfig",
+-      cache_populated);
++  PopulateFromCanonicalConfig(server_id, cached);
+   return cached;
+ }
+ 
+@@ -433,11 +396,7 @@ void QuicCryptoClientConfig::FillInchoateClientHello(
+   // FLAGS_quic_use_chlo_packet_size
+   out->set_minimum_size(kClientHelloMinimumSize);
+ 
+-  // Server name indication. We only send SNI if it's a valid domain name, as
+-  // per the spec.
+-  if (QuicHostnameUtils::IsValidSNI(server_id.host())) {
+-    out->SetStringPiece(kSNI, server_id.host());
+-  }
++  out->SetStringPiece(kSNI, server_id.host());
+   out->SetVersion(kVER, preferred_version);
+ 
+   if (!user_agent_id_.empty()) {
+diff --git a/quic/core/crypto/quic_crypto_server_config.cc b/quic/core/crypto/quic_crypto_server_config.cc
+index 4108a83..9034892 100644
+--- a/quic/core/crypto/quic_crypto_server_config.cc
++++ b/quic/core/crypto/quic_crypto_server_config.cc
+@@ -32,16 +32,16 @@
+ #include "net/quic/core/quic_packets.h"
+ #include "net/quic/core/quic_socket_address_coder.h"
+ #include "net/quic/core/quic_utils.h"
++#include "net/quic/platform/api/quic_aligned.h"
+ #include "net/quic/platform/api/quic_bug_tracker.h"
+ #include "net/quic/platform/api/quic_clock.h"
+ #include "net/quic/platform/api/quic_endian.h"
+ #include "net/quic/platform/api/quic_flag_utils.h"
+ #include "net/quic/platform/api/quic_flags.h"
+-#include "net/quic/platform/api/quic_hostname_utils.h"
+ #include "net/quic/platform/api/quic_logging.h"
+ #include "net/quic/platform/api/quic_reference_counted.h"
+ #include "net/quic/platform/api/quic_text_utils.h"
+-#include "third_party/boringssl/src/include/openssl/sha.h"
++#include "third_party/boringssl/include/openssl/sha.h"
+ 
+ using std::string;
+ 
+@@ -155,7 +155,6 @@ QuicCryptoServerConfig::QuicCryptoServerConfig(
+     std::unique_ptr<ProofSource> proof_source)
+     : replay_protection_(true),
+       chlo_multiplier_(kMultiplier),
+-      configs_lock_(),
+       primary_config_(nullptr),
+       next_config_promotion_time_(QuicWallTime::Zero()),
+       proof_source_(std::move(proof_source)),
+@@ -316,7 +315,6 @@ CryptoHandshakeMessage* QuicCryptoServerConfig::AddConfig(
+   }
+ 
+   {
+-    QuicWriterMutexLock locked(&configs_lock_);
+     if (configs_.find(config->id) != configs_.end()) {
+       QUIC_LOG(WARNING) << "Failed to add config because another with the same "
+                            "server config id already exists: "
+@@ -367,7 +365,6 @@ bool QuicCryptoServerConfig::SetConfigs(
+   } else {
+     QUIC_LOG(INFO) << "Updating configs:";
+ 
+-    QuicWriterMutexLock locked(&configs_lock_);
+     ConfigMap new_configs;
+ 
+     for (std::vector<QuicReferenceCountedPointer<Config>>::const_iterator i =
+@@ -421,7 +418,6 @@ void QuicCryptoServerConfig::SetSourceAddressTokenKeys(
+ }
+ 
+ void QuicCryptoServerConfig::GetConfigIds(std::vector<string>* scids) const {
+-  QuicReaderMutexLock locked(&configs_lock_);
+   for (ConfigMap::const_iterator it = configs_.begin(); it != configs_.end();
+        ++it) {
+     scids->push_back(it->first);
+@@ -448,22 +444,16 @@ void QuicCryptoServerConfig::ValidateClientHello(
+   QuicReferenceCountedPointer<Config> requested_config;
+   QuicReferenceCountedPointer<Config> primary_config;
+   {
+-    QuicReaderMutexLock locked(&configs_lock_);
+-
+     if (!primary_config_.get()) {
+       result->error_code = QUIC_CRYPTO_INTERNAL_ERROR;
+       result->error_details = "No configurations loaded";
+     } else {
+       if (!next_config_promotion_time_.IsZero() &&
+           next_config_promotion_time_.IsAfter(now)) {
+-        configs_lock_.ReaderUnlock();
+-        configs_lock_.WriterLock();
+         SelectNewPrimaryConfig(now);
+         DCHECK(primary_config_.get());
+         DCHECK_EQ(configs_.find(primary_config_->id)->second.get(),
+                   primary_config_.get());
+-        configs_lock_.WriterUnlock();
+-        configs_lock_.ReaderLock();
+       }
+     }
+ 
+@@ -650,21 +640,15 @@ void QuicCryptoServerConfig::ProcessClientHello(
+   QuicReferenceCountedPointer<Config> primary_config;
+   bool no_primary_config = false;
+   {
+-    QuicReaderMutexLock locked(&configs_lock_);
+-
+     if (!primary_config_) {
+       no_primary_config = true;
+     } else {
+       if (!next_config_promotion_time_.IsZero() &&
+           next_config_promotion_time_.IsAfter(now)) {
+-        configs_lock_.ReaderUnlock();
+-        configs_lock_.WriterLock();
+         SelectNewPrimaryConfig(now);
+         DCHECK(primary_config_.get());
+         DCHECK_EQ(configs_.find(primary_config_->id)->second.get(),
+                   primary_config_.get());
+-        configs_lock_.WriterUnlock();
+-        configs_lock_.ReaderLock();
+       }
+ 
+       // Use the config that the client requested in order to do key-agreement.
+@@ -834,10 +818,7 @@ void QuicCryptoServerConfig::ProcessClientHelloAfterGetProof(
+   }
+ 
+   if (!info.sni.empty()) {
+-    std::unique_ptr<char[]> sni_tmp(new char[info.sni.length() + 1]);
+-    memcpy(sni_tmp.get(), info.sni.data(), info.sni.length());
+-    sni_tmp[info.sni.length()] = 0;
+-    params->sni = QuicHostnameUtils::NormalizeHostname(sni_tmp.get());
++    params->sni = info.sni.as_string();
+   }
+ 
+   string hkdf_suffix;
+@@ -886,7 +867,7 @@ void QuicCryptoServerConfig::ProcessClientHelloAfterGetProof(
+       return;
+     }
+ 
+-    char plaintext[kMaxPacketSize];
++    QUIC_CACHELINE_ALIGNED char plaintext[kMaxPacketSize];
+     size_t plaintext_length = 0;
+     const bool success = crypters.decrypter->DecryptPacket(
+         QUIC_VERSION_35, 0 /* packet number */,
+@@ -996,8 +977,6 @@ void QuicCryptoServerConfig::ProcessClientHelloAfterGetProof(
+ QuicReferenceCountedPointer<QuicCryptoServerConfig::Config>
+ QuicCryptoServerConfig::GetConfigWithScid(
+     QuicStringPiece requested_scid) const {
+-  configs_lock_.AssertReaderHeld();
+-
+   if (!requested_scid.empty()) {
+     ConfigMap::const_iterator it = configs_.find(requested_scid.as_string());
+     if (it != configs_.end()) {
+@@ -1187,13 +1166,7 @@ void QuicCryptoServerConfig::EvaluateClientHello(
+     return;
+   }
+ 
+-  if (client_hello.GetStringPiece(kSNI, &info->sni) &&
+-      !QuicHostnameUtils::IsValidSNI(info->sni)) {
+-    helper.ValidationComplete(QUIC_INVALID_CRYPTO_MESSAGE_PARAMETER,
+-                              "Invalid SNI name", nullptr);
+-    return;
+-  }
+-
++  client_hello.GetStringPiece(kSNI, &info->sni);
+   client_hello.GetStringPiece(kUAID, &info->user_agent_id);
+ 
+   HandshakeFailureReason source_address_token_error = MAX_FAILURE_REASON;
+@@ -1337,7 +1310,6 @@ void QuicCryptoServerConfig::BuildServerConfigUpdateMessage(
+   string source_address_token;
+   const CommonCertSets* common_cert_sets;
+   {
+-    QuicReaderMutexLock locked(&configs_lock_);
+     serialized = primary_config_->serialized;
+     common_cert_sets = primary_config_->common_cert_sets;
+     source_address_token = NewSourceAddressToken(
+@@ -1756,7 +1728,6 @@ void QuicCryptoServerConfig::set_enable_serving_sct(bool enable_serving_sct) {
+ 
+ void QuicCryptoServerConfig::AcquirePrimaryConfigChangedCb(
+     std::unique_ptr<PrimaryConfigChangedCallback> cb) {
+-  QuicWriterMutexLock locked(&configs_lock_);
+   primary_config_changed_cb_ = std::move(cb);
+ }
+ 
+@@ -1799,7 +1770,6 @@ string QuicCryptoServerConfig::NewSourceAddressToken(
+ }
+ 
+ int QuicCryptoServerConfig::NumberOfConfigs() const {
+-  QuicReaderMutexLock locked(&configs_lock_);
+   return configs_.size();
+ }
+ 
+diff --git a/quic/core/crypto/quic_crypto_server_config.h b/quic/core/crypto/quic_crypto_server_config.h
+index 861eae6..5007797 100644
+--- a/quic/core/crypto/quic_crypto_server_config.h
++++ b/quic/core/crypto/quic_crypto_server_config.h
+@@ -24,7 +24,6 @@
+ #include "net/quic/core/proto/source_address_token.pb.h"
+ #include "net/quic/core/quic_time.h"
+ #include "net/quic/platform/api/quic_export.h"
+-#include "net/quic/platform/api/quic_mutex.h"
+ #include "net/quic/platform/api/quic_reference_counted.h"
+ #include "net/quic/platform/api/quic_socket_address.h"
+ #include "net/quic/platform/api/quic_string_piece.h"
+@@ -465,8 +464,7 @@ class QUIC_EXPORT_PRIVATE QuicCryptoServerConfig {
+ 
+   // Get a ref to the config with a given server config id.
+   QuicReferenceCountedPointer<Config> GetConfigWithScid(
+-      QuicStringPiece requested_scid) const
+-      SHARED_LOCKS_REQUIRED(configs_lock_);
++      QuicStringPiece requested_scid) const;
+ 
+   // ConfigPrimaryTimeLessThan returns true if a->primary_time <
+   // b->primary_time.
+@@ -709,20 +707,17 @@ class QUIC_EXPORT_PRIVATE QuicCryptoServerConfig {
+   //   1) configs_.empty() <-> primary_config_ == nullptr
+   //   2) primary_config_ != nullptr -> primary_config_->is_primary
+   //   3) ∀ c∈configs_, c->is_primary <-> c == primary_config_
+-  mutable QuicMutex configs_lock_;
+   // configs_ contains all active server configs. It's expected that there are
+   // about half-a-dozen configs active at any one time.
+-  ConfigMap configs_ GUARDED_BY(configs_lock_);
++  ConfigMap configs_;
+   // primary_config_ points to a Config (which is also in |configs_|) which is
+   // the primary config - i.e. the one that we'll give out to new clients.
+-  mutable QuicReferenceCountedPointer<Config> primary_config_
+-      GUARDED_BY(configs_lock_);
++  mutable QuicReferenceCountedPointer<Config> primary_config_;
+   // next_config_promotion_time_ contains the nearest, future time when an
+   // active config will be promoted to primary.
+-  mutable QuicWallTime next_config_promotion_time_ GUARDED_BY(configs_lock_);
++  mutable QuicWallTime next_config_promotion_time_;
+   // Callback to invoke when the primary config changes.
+-  std::unique_ptr<PrimaryConfigChangedCallback> primary_config_changed_cb_
+-      GUARDED_BY(configs_lock_);
++  std::unique_ptr<PrimaryConfigChangedCallback> primary_config_changed_cb_;
+ 
+   // Used to protect the source-address tokens that are given to clients.
+   CryptoSecretBoxer source_address_token_boxer_;
+diff --git a/quic/core/crypto/quic_decrypter.cc b/quic/core/crypto/quic_decrypter.cc
+index 924b07c..2c3136e 100644
+--- a/quic/core/crypto/quic_decrypter.cc
++++ b/quic/core/crypto/quic_decrypter.cc
+@@ -14,7 +14,7 @@
+ #include "net/quic/core/crypto/null_decrypter.h"
+ #include "net/quic/platform/api/quic_bug_tracker.h"
+ #include "net/quic/platform/api/quic_logging.h"
+-#include "third_party/boringssl/src/include/openssl/tls1.h"
++#include "third_party/boringssl/include/openssl/tls1.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/quic_encrypter.cc b/quic/core/crypto/quic_encrypter.cc
+index ef78336..acca9ee 100644
+--- a/quic/core/crypto/quic_encrypter.cc
++++ b/quic/core/crypto/quic_encrypter.cc
+@@ -13,7 +13,7 @@
+ #include "net/quic/core/crypto/null_encrypter.h"
+ #include "net/quic/platform/api/quic_bug_tracker.h"
+ #include "net/quic/platform/api/quic_logging.h"
+-#include "third_party/boringssl/src/include/openssl/tls1.h"
++#include "third_party/boringssl/include/openssl/tls1.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/crypto/quic_random.cc b/quic/core/crypto/quic_random.cc
+index ac54517..c30b6a5 100644
+--- a/quic/core/crypto/quic_random.cc
++++ b/quic/core/crypto/quic_random.cc
+@@ -5,7 +5,6 @@
+ #include "net/quic/core/crypto/quic_random.h"
+ 
+ #include "base/macros.h"
+-#include "base/memory/singleton.h"
+ #include "crypto/random.h"
+ #include "net/quic/platform/api/quic_bug_tracker.h"
+ 
+@@ -15,7 +14,10 @@ namespace {
+ 
+ class DefaultRandom : public QuicRandom {
+  public:
+-  static DefaultRandom* GetInstance();
++  static DefaultRandom* GetInstance() {
++    return &s_default_random;
++  }
++  static DefaultRandom s_default_random;
+ 
+   // QuicRandom implementation
+   void RandBytes(void* data, size_t len) override;
+@@ -26,13 +28,10 @@ class DefaultRandom : public QuicRandom {
+   DefaultRandom() {}
+   ~DefaultRandom() override {}
+ 
+-  friend struct base::DefaultSingletonTraits<DefaultRandom>;
+   DISALLOW_COPY_AND_ASSIGN(DefaultRandom);
+ };
+ 
+-DefaultRandom* DefaultRandom::GetInstance() {
+-  return base::Singleton<DefaultRandom>::get();
+-}
++DefaultRandom DefaultRandom::s_default_random;
+ 
+ void DefaultRandom::RandBytes(void* data, size_t len) {
+   crypto::RandBytes(data, len);
+diff --git a/quic/core/crypto/scoped_evp_aead_ctx.h b/quic/core/crypto/scoped_evp_aead_ctx.h
+index 0716ea9..0efbcca 100644
+--- a/quic/core/crypto/scoped_evp_aead_ctx.h
++++ b/quic/core/crypto/scoped_evp_aead_ctx.h
+@@ -6,7 +6,7 @@
+ #define NET_QUIC_CORE_CRYPTO_SCOPED_EVP_AEAD_CTX_H_
+ 
+ #include "base/macros.h"
+-#include "third_party/boringssl/src/include/openssl/evp.h"
++#include "third_party/boringssl/include/openssl/evp.h"
+ 
+ namespace net {
+ 
+diff --git a/quic/core/quic_alarm.cc b/quic/core/quic_alarm.cc
+index 8150eb8..f243475 100644
+--- a/quic/core/quic_alarm.cc
++++ b/quic/core/quic_alarm.cc
+@@ -32,6 +32,9 @@ void QuicAlarm::Update(QuicTime new_deadline, QuicTime::Delta granularity) {
+     Cancel();
+     return;
+   }
++  if (new_deadline == deadline_) {
++    return;
++  }
+   if (std::abs((new_deadline - deadline_).ToMicroseconds()) <
+       granularity.ToMicroseconds()) {
+     return;
+diff --git a/quic/core/quic_connection.cc b/quic/core/quic_connection.cc
+index b8a568a..716b192 100644
+--- a/quic/core/quic_connection.cc
++++ b/quic/core/quic_connection.cc
+@@ -16,7 +16,6 @@
+ 
+ #include "base/format_macros.h"
+ #include "base/macros.h"
+-#include "base/metrics/histogram_macros.h"
+ #include "net/base/net_errors.h"
+ #include "net/quic/core/crypto/crypto_protocol.h"
+ #include "net/quic/core/crypto/quic_decrypter.h"
+@@ -27,6 +26,7 @@
+ #include "net/quic/core/quic_packet_generator.h"
+ #include "net/quic/core/quic_pending_retransmission.h"
+ #include "net/quic/core/quic_utils.h"
++#include "net/quic/platform/api/quic_aligned.h"
+ #include "net/quic/platform/api/quic_bug_tracker.h"
+ #include "net/quic/platform/api/quic_flag_utils.h"
+ #include "net/quic/platform/api/quic_flags.h"
+@@ -224,7 +224,7 @@ QuicConnection::QuicConnection(
+       unlimited_ack_decimation_(false),
+       delay_setting_retransmission_alarm_(false),
+       pending_retransmission_alarm_(false),
+-      defer_send_in_response_to_packets_(false),
++      defer_send_in_response_to_packets_(true),
+       ping_timeout_(QuicTime::Delta::FromSeconds(kPingTimeoutSecs)),
+       arena_(),
+       ack_alarm_(alarm_factory_->CreateAlarm(arena_.New<AckAlarmDelegate>(this),
+@@ -1563,7 +1563,7 @@ void QuicConnection::WritePendingRetransmissions() {
+       ScopedPacketFlusher flusher(this, NO_ACK);
+       packet_generator_.FlushAllQueuedFrames();
+     }
+-    char buffer[kMaxPacketSize];
++    QUIC_CACHELINE_ALIGNED char buffer[kMaxPacketSize];
+     packet_generator_.ReserializeAllFrames(pending, buffer, kMaxPacketSize);
+   }
+ }
+@@ -2143,12 +2143,9 @@ void QuicConnection::TearDownLocalConnectionState(
+   connected_ = false;
+   DCHECK(visitor_ != nullptr);
+   // TODO(rtenneti): crbug.com/546668. A temporary fix. Added a check for null
+-  // |visitor_| to fix crash bug. Delete |visitor_| check and histogram after
+-  // fix is merged.
++  // |visitor_| to fix crash bug. Delete |visitor_| check after fix is merged.
+   if (visitor_ != nullptr) {
+     visitor_->OnConnectionClosed(error, error_details, source);
+-  } else {
+-    UMA_HISTOGRAM_BOOLEAN("Net.QuicCloseConnection.NullVisitor", true);
+   }
+   if (debug_visitor_ != nullptr) {
+     debug_visitor_->OnConnectionClosed(error, error_details, source);
+@@ -2255,6 +2252,11 @@ void QuicConnection::CheckForTimeout() {
+                 << " idle_network_timeout: "
+                 << idle_network_timeout_.ToMicroseconds();
+   if (idle_duration >= idle_network_timeout_) {
++    if (retransmission_alarm_->IsSet()) {
++      CloseConnection(QUIC_TOO_MANY_RTOS, "Too many retransmission timeouts.",
++                      ConnectionCloseBehavior::SEND_CONNECTION_CLOSE_PACKET);
++      return;
++    }
+     const string error_details = "No recent network activity.";
+     QUIC_DVLOG(1) << ENDPOINT << error_details;
+     if (GetQuicReloadableFlag(quic_explicit_close_after_tlp) &&
+diff --git a/quic/core/quic_connection.h b/quic/core/quic_connection.h
+index 31327e3..a79fc76 100644
+--- a/quic/core/quic_connection.h
++++ b/quic/core/quic_connection.h
+@@ -26,7 +26,6 @@
+ 
+ #include "base/macros.h"
+ #include "net/quic/core/crypto/quic_decrypter.h"
+-#include "net/quic/core/proto/cached_network_parameters.pb.h"
+ #include "net/quic/core/quic_alarm.h"
+ #include "net/quic/core/quic_alarm_factory.h"
+ #include "net/quic/core/quic_blocked_writer_interface.h"
+diff --git a/quic/core/quic_crypto_client_handshaker.cc b/quic/core/quic_crypto_client_handshaker.cc
+index 997e40d..7a760a2 100644
+--- a/quic/core/quic_crypto_client_handshaker.cc
++++ b/quic/core/quic_crypto_client_handshaker.cc
+@@ -6,8 +6,6 @@
+ 
+ #include <memory>
+ 
+-#include "base/metrics/histogram_functions.h"
+-#include "base/metrics/histogram_macros.h"
+ #include "net/quic/core/crypto/crypto_protocol.h"
+ #include "net/quic/core/crypto/crypto_utils.h"
+ #include "net/quic/core/quic_session.h"
+@@ -267,8 +265,6 @@ void QuicCryptoClientHandshaker::DoInitialize(
+     // expiration because it may have been a while since we last verified
+     // the proof.
+     DCHECK(crypto_config_->proof_verifier());
+-    // Track proof verification time when cached server config is used.
+-    proof_verify_start_time_ = base::TimeTicks::Now();
+     chlo_hash_ = cached->chlo_hash();
+     // If the cached state needs to be verified, do it now.
+     next_state_ = STATE_VERIFY_PROOF;
+@@ -426,12 +422,6 @@ void QuicCryptoClientHandshaker::DoReceiveREJ(
+       packed_error |= 1 << (reason - 1);
+     }
+     DVLOG(1) << "Reasons for rejection: " << packed_error;
+-    if (num_client_hellos_ == QuicCryptoClientStream::kMaxClientHellos) {
+-      base::UmaHistogramSparse("Net.QuicClientHelloRejectReasons.TooMany",
+-                               packed_error);
+-    }
+-    base::UmaHistogramSparse("Net.QuicClientHelloRejectReasons.Secure",
+-                             packed_error);
+   }
+ 
+   // Receipt of a REJ message means that the server received the CHLO
+@@ -499,10 +489,6 @@ QuicAsyncStatus QuicCryptoClientHandshaker::DoVerifyProof(
+ 
+ void QuicCryptoClientHandshaker::DoVerifyProofComplete(
+     QuicCryptoClientConfig::CachedState* cached) {
+-  if (!proof_verify_start_time_.is_null()) {
+-    UMA_HISTOGRAM_TIMES("Net.QuicSession.VerifyProofTime.CachedServerConfig",
+-                        base::TimeTicks::Now() - proof_verify_start_time_);
+-  }
+   if (!verify_ok_) {
+     if (verify_details_) {
+       proof_handler_->OnProofVerifyDetailsAvailable(*verify_details_);
+@@ -513,8 +499,6 @@ void QuicCryptoClientHandshaker::DoVerifyProofComplete(
+       return;
+     }
+     next_state_ = STATE_NONE;
+-    UMA_HISTOGRAM_BOOLEAN("Net.QuicVerifyProofFailed.HandshakeConfirmed",
+-                          handshake_confirmed());
+     stream_->CloseConnectionWithDetails(
+         QUIC_PROOF_INVALID, "Proof invalid: " + verify_error_details_);
+     return;
+@@ -656,17 +640,13 @@ void QuicCryptoClientHandshaker::DoReceiveSHLO(
+ 
+ void QuicCryptoClientHandshaker::DoInitializeServerConfigUpdate(
+     QuicCryptoClientConfig::CachedState* cached) {
+-  bool update_ignored = false;
+   if (!cached->IsEmpty() && !cached->signature().empty()) {
+     // Note that we verify the proof even if the cached proof is valid.
+     DCHECK(crypto_config_->proof_verifier());
+     next_state_ = STATE_VERIFY_PROOF;
+   } else {
+-    update_ignored = true;
+     next_state_ = STATE_NONE;
+   }
+-  UMA_HISTOGRAM_COUNTS_1M("Net.QuicNumServerConfig.UpdateMessagesIgnored",
+-                          update_ignored);
+ }
+ 
+ void QuicCryptoClientHandshaker::SetCachedProofValid(
+diff --git a/quic/core/quic_crypto_client_handshaker.h b/quic/core/quic_crypto_client_handshaker.h
+index ad5e79b..32ca24a 100644
+--- a/quic/core/quic_crypto_client_handshaker.h
++++ b/quic/core/quic_crypto_client_handshaker.h
+@@ -222,9 +222,6 @@ class QUIC_EXPORT_PRIVATE QuicCryptoClientHandshaker
+   // STATE_VERIFY_PROOF*, and subsequent STATE_SEND_CHLO state.
+   bool stateless_reject_received_;
+ 
+-  // Only used in chromium, not internally.
+-  base::TimeTicks proof_verify_start_time_;
+-
+   int num_scup_messages_received_;
+ 
+   bool encryption_established_;
+diff --git a/quic/core/quic_crypto_client_stream.cc b/quic/core/quic_crypto_client_stream.cc
+index 1599716..d45d2f8 100644
+--- a/quic/core/quic_crypto_client_stream.cc
++++ b/quic/core/quic_crypto_client_stream.cc
+@@ -6,8 +6,6 @@
+ 
+ #include <memory>
+ 
+-#include "base/metrics/histogram_macros.h"
+-#include "base/metrics/sparse_histogram.h"
+ #include "net/quic/core/crypto/crypto_protocol.h"
+ #include "net/quic/core/crypto/crypto_utils.h"
+ #include "net/quic/core/crypto/null_encrypter.h"
+diff --git a/quic/core/quic_crypto_server_handshaker.cc b/quic/core/quic_crypto_server_handshaker.cc
+index 9916415..9e05660 100644
+--- a/quic/core/quic_crypto_server_handshaker.cc
++++ b/quic/core/quic_crypto_server_handshaker.cc
+@@ -8,7 +8,7 @@
+ 
+ #include "net/quic/platform/api/quic_arraysize.h"
+ #include "net/quic/platform/api/quic_text_utils.h"
+-#include "third_party/boringssl/src/include/openssl/sha.h"
++#include "third_party/boringssl/include/openssl/sha.h"
+ 
+ using std::string;
+ 
+diff --git a/quic/core/quic_flags_list.h b/quic/core/quic_flags_list.h
+index 71a5d90..834fa3b 100644
+--- a/quic/core/quic_flags_list.h
++++ b/quic/core/quic_flags_list.h
+@@ -43,15 +43,9 @@ QUIC_FLAG(bool,
+           FLAGS_quic_reloadable_flag_quic_use_cheap_stateless_rejects,
+           true)
+ 
+-// If true, QUIC respect HTTP2 SETTINGS frame rather than always close the
+-// connection.
+-QUIC_FLAG(bool,
+-          FLAGS_quic_reloadable_flag_quic_respect_http2_settings_frame,
+-          true)
+-
+ // If true, allows packets to be buffered in anticipation of a future CHLO, and
+ // allow CHLO packets to be buffered until next iteration of the event loop.
+-QUIC_FLAG(bool, FLAGS_quic_allow_chlo_buffering, true)
++QUIC_FLAG(bool, FLAGS_quic_allow_chlo_buffering, false)
+ 
+ // If true, GFE sends SETTINGS_MAX_HEADER_LIST_SIZE to the client at the
+ // beginning of a connection.
+@@ -162,9 +156,6 @@ QUIC_FLAG(bool,
+           FLAGS_quic_reloadable_flag_quic_fix_sequencer_buffer_block_count2,
+           true)
+ 
+-// If true, use deframer from net/quic/http instead of net/http2.
+-QUIC_FLAG(bool, FLAGS_quic_reloadable_flag_quic_enable_hq_deframer, false)
+-
+ // If true, then 1) at sender, avoid sending empty acks, 2) at receiver, close
+ // connection when a ack frame\'s first block length is 0, unless the ack is
+ // completely empty.
+diff --git a/quic/core/quic_sent_packet_manager.cc b/quic/core/quic_sent_packet_manager.cc
+index 3c2fbf0..b353061 100644
+--- a/quic/core/quic_sent_packet_manager.cc
++++ b/quic/core/quic_sent_packet_manager.cc
+@@ -7,7 +7,6 @@
+ #include <algorithm>
+ #include <string>
+ 
+-#include "net/quic/chromium/quic_utils_chromium.h"
+ #include "net/quic/core/congestion_control/general_loss_algorithm.h"
+ #include "net/quic/core/congestion_control/pacing_sender.h"
+ #include "net/quic/core/crypto/crypto_protocol.h"
+diff --git a/quic/core/quic_session.h b/quic/core/quic_session.h
+index 456f315..3440ded 100644
+--- a/quic/core/quic_session.h
++++ b/quic/core/quic_session.h
+@@ -306,7 +306,7 @@ class QUIC_EXPORT_PRIVATE QuicSession : public QuicConnectionVisitorInterface,
+   // Create a new stream to handle a locally-initiated stream.
+   // Caller does not own the returned stream.
+   // Returns nullptr if max streams have already been opened.
+-  virtual QuicStream* CreateOutgoingDynamicStream() = 0;
++  virtual QuicStream* CreateOutgoingDynamicStream(SpdyPriority priority) = 0;
+ 
+   // Return the reserved crypto stream.
+   virtual QuicCryptoStream* GetMutableCryptoStream() = 0;
+diff --git a/quic/core/quic_time.h b/quic/core/quic_time.h
+index 2bbdc18..20b3e74 100644
+--- a/quic/core/quic_time.h
++++ b/quic/core/quic_time.h
+@@ -15,9 +15,9 @@
+ #include <cstdint>
+ #include <limits>
+ #include <ostream>
++#include <string>
+ 
+ #include "base/compiler_specific.h"
+-#include "base/time/time.h"
+ #include "net/quic/platform/api/quic_export.h"
+ 
+ #define QUICTIME_CONSTEXPR inline
+@@ -35,8 +35,6 @@ class QUIC_EXPORT_PRIVATE QuicTime {
+   // time, stored in microsecond resolution.
+   class QUIC_EXPORT_PRIVATE Delta {
+    public:
+-    explicit Delta(base::TimeDelta delta);
+-
+     // Create a object with an offset of 0.
+     static QUICTIME_CONSTEXPR Delta Zero() { return Delta(0); }
+ 
+@@ -78,7 +76,6 @@ class QUIC_EXPORT_PRIVATE QuicTime {
+     std::string ToDebugValue() const;
+ 
+    private:
+-    base::TimeDelta delta_;
+     friend inline bool operator==(QuicTime::Delta lhs, QuicTime::Delta rhs);
+     friend inline bool operator<(QuicTime::Delta lhs, QuicTime::Delta rhs);
+     friend inline QuicTime::Delta operator<<(QuicTime::Delta lhs, size_t rhs);
+@@ -206,6 +203,9 @@ inline bool operator<=(QuicTime::Delta lhs, QuicTime::Delta rhs) {
+ inline bool operator>=(QuicTime::Delta lhs, QuicTime::Delta rhs) {
+   return !(lhs < rhs);
+ }
++inline QuicTime::Delta operator<<(QuicTime::Delta lhs, size_t rhs) {
++  return QuicTime::Delta(lhs.time_offset_ << rhs);
++}
+ inline QuicTime::Delta operator>>(QuicTime::Delta lhs, size_t rhs) {
+   return QuicTime::Delta(lhs.time_offset_ >> rhs);
+ }
+diff --git a/quic/platform/api/quic_socket_address.cc b/quic/platform/api/quic_socket_address.cc
+index fb08034..9abc03c 100644
+--- a/quic/platform/api/quic_socket_address.cc
++++ b/quic/platform/api/quic_socket_address.cc
+@@ -14,7 +14,7 @@ QuicSocketAddress::QuicSocketAddress(QuicIpAddress address, uint16_t port)
+ QuicSocketAddress::QuicSocketAddress(const struct sockaddr_storage& saddr)
+     : impl_(saddr) {}
+ 
+-QuicSocketAddress::QuicSocketAddress(const struct sockaddr& saddr)
++QuicSocketAddress::QuicSocketAddress(const struct sockaddr* saddr)
+     : impl_(saddr) {}
+ 
+ QuicSocketAddress::QuicSocketAddress(const QuicSocketAddressImpl& impl)
+diff --git a/quic/platform/api/quic_socket_address.h b/quic/platform/api/quic_socket_address.h
+index 8aac753..09baf85 100644
+--- a/quic/platform/api/quic_socket_address.h
++++ b/quic/platform/api/quic_socket_address.h
+@@ -19,7 +19,7 @@ class QUIC_EXPORT_PRIVATE QuicSocketAddress {
+   QuicSocketAddress() = default;
+   QuicSocketAddress(QuicIpAddress address, uint16_t port);
+   explicit QuicSocketAddress(const struct sockaddr_storage& saddr);
+-  explicit QuicSocketAddress(const struct sockaddr& saddr);
++  explicit QuicSocketAddress(const struct sockaddr* saddr);
+   explicit QuicSocketAddress(const QuicSocketAddressImpl& impl);
+   QuicSocketAddress(const QuicSocketAddress& other) = default;
+   QuicSocketAddress& operator=(const QuicSocketAddress& other) = default;
+diff --git a/quic/platform/impl/quic_reference_counted_impl.h b/quic/platform/impl/quic_reference_counted_impl.h
+index 0edd3c6..a47f1e4 100644
+--- a/quic/platform/impl/quic_reference_counted_impl.h
++++ b/quic/platform/impl/quic_reference_counted_impl.h
+@@ -11,7 +11,7 @@
+ namespace net {
+ 
+ class QUIC_EXPORT_PRIVATE QuicReferenceCountedImpl
+-    : public base::RefCountedThreadSafe<QuicReferenceCountedImpl> {
++    : public base::RefCounted<QuicReferenceCountedImpl> {
+  public:
+   QuicReferenceCountedImpl() {}
+ 
+@@ -19,7 +19,7 @@ class QUIC_EXPORT_PRIVATE QuicReferenceCountedImpl
+   virtual ~QuicReferenceCountedImpl() {}
+ 
+  private:
+-  friend class base::RefCountedThreadSafe<QuicReferenceCountedImpl>;
++  friend class base::RefCounted<QuicReferenceCountedImpl>;
+ };
+ 
+ template <class T>
+diff --git a/quic/platform/impl/quic_socket_address_impl.cc b/quic/platform/impl/quic_socket_address_impl.cc
+index 4a86a25..b17b16f 100644
+--- a/quic/platform/impl/quic_socket_address_impl.cc
++++ b/quic/platform/impl/quic_socket_address_impl.cc
+@@ -19,22 +19,17 @@ QuicSocketAddressImpl::QuicSocketAddressImpl(QuicIpAddressImpl address,
+     : socket_address_(address.ip_address(), port) {}
+ 
+ QuicSocketAddressImpl::QuicSocketAddressImpl(
+-    const struct sockaddr_storage& saddr) {
+-  if (saddr.ss_family == AF_INET) {
+-    CHECK(socket_address_.FromSockAddr(
+-        reinterpret_cast<const sockaddr*>(&saddr), sizeof(struct sockaddr_in)));
+-  } else if (saddr.ss_family == AF_INET6) {
+-    CHECK(
+-        socket_address_.FromSockAddr(reinterpret_cast<const sockaddr*>(&saddr),
+-                                     sizeof(struct sockaddr_in6)));
++    const struct sockaddr_storage& saddr) 
++    : QuicSocketAddressImpl(reinterpret_cast<const sockaddr*>(&saddr)) {}
++
++QuicSocketAddressImpl::QuicSocketAddressImpl(const struct sockaddr* saddr) {
++  if (saddr->sa_family == AF_INET) {
++    CHECK(socket_address_.FromSockAddr(saddr, sizeof(struct sockaddr_in)));
++  } else if (saddr->sa_family == AF_INET6) {
++    CHECK(socket_address_.FromSockAddr(saddr, sizeof(struct sockaddr_in6)));
+   }
+ }
+ 
+-QuicSocketAddressImpl::QuicSocketAddressImpl(const struct sockaddr& saddr) {
+-  QUIC_BUG << "QuicSocketAddressImpl(const struct sockaddr& saddr) is not "
+-              "implemented.";
+-}
+-
+ bool operator==(const QuicSocketAddressImpl& lhs,
+                 const QuicSocketAddressImpl& rhs) {
+   return lhs.socket_address_ == rhs.socket_address_;
+diff --git a/quic/platform/impl/quic_socket_address_impl.h b/quic/platform/impl/quic_socket_address_impl.h
+index 870ef75..750aa05 100644
+--- a/quic/platform/impl/quic_socket_address_impl.h
++++ b/quic/platform/impl/quic_socket_address_impl.h
+@@ -17,7 +17,7 @@ class QUIC_EXPORT_PRIVATE QuicSocketAddressImpl {
+   explicit QuicSocketAddressImpl(const IPEndPoint& addr);
+   QuicSocketAddressImpl(QuicIpAddressImpl address, uint16_t port);
+   explicit QuicSocketAddressImpl(const struct sockaddr_storage& saddr);
+-  explicit QuicSocketAddressImpl(const struct sockaddr& saddr);
++  explicit QuicSocketAddressImpl(const struct sockaddr* saddr);
+   QuicSocketAddressImpl(const QuicSocketAddressImpl& other) = default;
+   QuicSocketAddressImpl& operator=(const QuicSocketAddressImpl& other) =
+       default;
+diff --git a/spdy/core/priority_write_scheduler.h b/spdy/core/priority_write_scheduler.h
+index fa14d4d..9cc331f 100644
+--- a/spdy/core/priority_write_scheduler.h
++++ b/spdy/core/priority_write_scheduler.h
+@@ -9,12 +9,12 @@
+ #include <stdint.h>
+ 
+ #include <algorithm>
++#include <deque>
+ #include <tuple>
+ #include <unordered_map>
+ #include <utility>
+ #include <vector>
+ 
+-#include "base/containers/circular_deque.h"
+ #include "base/logging.h"
+ #include "net/spdy/core/spdy_bug_tracker.h"
+ #include "net/spdy/core/spdy_protocol.h"
+@@ -35,8 +35,6 @@ class PriorityWriteSchedulerPeer;
+ // for each priority value.  Each PriorityInfo contains a list of streams of
+ // that priority that are ready to write, as well as a timestamp of the last
+ // I/O event that occurred for a stream of that priority.
+-//
+-// DO NOT USE. Deprecated.
+ template <typename StreamIdType>
+ class PriorityWriteScheduler : public WriteScheduler<StreamIdType> {
+  public:
+@@ -261,8 +259,8 @@ class PriorityWriteScheduler : public WriteScheduler<StreamIdType> {
+     bool ready;
+   };
+ 
+-  // 0(1) size lookup, Amortized 0(1) insert at front or back.
+-  using ReadyList = base::circular_deque<StreamInfo*>;
++  // 0(1) size lookup, 0(1) insert at front or back.
++  typedef std::deque<StreamInfo*> ReadyList;
+ 
+   // State kept for each priority level.
+   struct PriorityInfo {
+diff --git a/spdy/core/spdy_protocol.cc b/spdy/core/spdy_protocol.cc
+index 6beb2fa..7339adb 100644
+--- a/spdy/core/spdy_protocol.cc
++++ b/spdy/core/spdy_protocol.cc
+@@ -2,25 +2,14 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#include "net/spdy/core/spdy_protocol.h"
++// <PUIC-PATCH>
+ 
+-#include <ostream>
++#include "net/spdy/core/spdy_protocol.h"
+ 
+ #include "net/spdy/core/spdy_bug_tracker.h"
+ 
+ namespace net {
+ 
+-const char* const kHttp2ConnectionHeaderPrefix =
+-    "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+-
+-std::ostream& operator<<(std::ostream& out, SpdySettingsIds id) {
+-  return out << static_cast<uint16_t>(id);
+-}
+-
+-std::ostream& operator<<(std::ostream& out, SpdyFrameType frame_type) {
+-  return out << SerializeFrameType(frame_type);
+-}
+-
+ SpdyPriority ClampSpdy3Priority(SpdyPriority priority) {
+   if (priority < kV3HighestPriority) {
+     SPDY_BUG << "Invalid priority: " << static_cast<int>(priority);
+@@ -57,392 +46,4 @@ SpdyPriority Http2WeightToSpdy3Priority(int weight) {
+   return static_cast<SpdyPriority>(7.f - (weight - 1) / kSteps);
+ }
+ 
+-bool IsDefinedFrameType(uint8_t frame_type_field) {
+-  return frame_type_field <= SerializeFrameType(SpdyFrameType::MAX_FRAME_TYPE);
+-}
+-
+-SpdyFrameType ParseFrameType(uint8_t frame_type_field) {
+-  SPDY_BUG_IF(!IsDefinedFrameType(frame_type_field))
+-      << "Frame type not defined: " << static_cast<int>(frame_type_field);
+-  return static_cast<SpdyFrameType>(frame_type_field);
+-}
+-
+-uint8_t SerializeFrameType(SpdyFrameType frame_type) {
+-  return static_cast<uint8_t>(frame_type);
+-}
+-
+-bool IsValidHTTP2FrameStreamId(SpdyStreamId current_frame_stream_id,
+-                               SpdyFrameType frame_type_field) {
+-  if (current_frame_stream_id == 0) {
+-    switch (frame_type_field) {
+-      case SpdyFrameType::DATA:
+-      case SpdyFrameType::HEADERS:
+-      case SpdyFrameType::PRIORITY:
+-      case SpdyFrameType::RST_STREAM:
+-      case SpdyFrameType::CONTINUATION:
+-      case SpdyFrameType::PUSH_PROMISE:
+-        // These frame types must specify a stream
+-        return false;
+-      default:
+-        return true;
+-    }
+-  } else {
+-    switch (frame_type_field) {
+-      case SpdyFrameType::GOAWAY:
+-      case SpdyFrameType::SETTINGS:
+-      case SpdyFrameType::PING:
+-        // These frame types must not specify a stream
+-        return false;
+-      default:
+-        return true;
+-    }
+-  }
+-}
+-
+-const char* FrameTypeToString(SpdyFrameType frame_type) {
+-  switch (frame_type) {
+-    case SpdyFrameType::DATA:
+-      return "DATA";
+-    case SpdyFrameType::RST_STREAM:
+-      return "RST_STREAM";
+-    case SpdyFrameType::SETTINGS:
+-      return "SETTINGS";
+-    case SpdyFrameType::PING:
+-      return "PING";
+-    case SpdyFrameType::GOAWAY:
+-      return "GOAWAY";
+-    case SpdyFrameType::HEADERS:
+-      return "HEADERS";
+-    case SpdyFrameType::WINDOW_UPDATE:
+-      return "WINDOW_UPDATE";
+-    case SpdyFrameType::PUSH_PROMISE:
+-      return "PUSH_PROMISE";
+-    case SpdyFrameType::CONTINUATION:
+-      return "CONTINUATION";
+-    case SpdyFrameType::PRIORITY:
+-      return "PRIORITY";
+-    case SpdyFrameType::ALTSVC:
+-      return "ALTSVC";
+-    case SpdyFrameType::EXTENSION:
+-      return "EXTENSION (unspecified)";
+-  }
+-  return "UNKNOWN_FRAME_TYPE";
+-}
+-
+-bool ParseSettingsId(uint16_t wire_setting_id, SpdySettingsIds* setting_id) {
+-  if (wire_setting_id < SETTINGS_MIN || wire_setting_id > SETTINGS_MAX) {
+-    return false;
+-  }
+-
+-  *setting_id = static_cast<SpdySettingsIds>(wire_setting_id);
+-  return true;
+-}
+-
+-bool SettingsIdToString(SpdySettingsIds id, const char** settings_id_string) {
+-  switch (id) {
+-    case SETTINGS_HEADER_TABLE_SIZE:
+-      *settings_id_string = "SETTINGS_HEADER_TABLE_SIZE";
+-      return true;
+-    case SETTINGS_ENABLE_PUSH:
+-      *settings_id_string = "SETTINGS_ENABLE_PUSH";
+-      return true;
+-    case SETTINGS_MAX_CONCURRENT_STREAMS:
+-      *settings_id_string = "SETTINGS_MAX_CONCURRENT_STREAMS";
+-      return true;
+-    case SETTINGS_INITIAL_WINDOW_SIZE:
+-      *settings_id_string = "SETTINGS_INITIAL_WINDOW_SIZE";
+-      return true;
+-    case SETTINGS_MAX_FRAME_SIZE:
+-      *settings_id_string = "SETTINGS_MAX_FRAME_SIZE";
+-      return true;
+-    case SETTINGS_MAX_HEADER_LIST_SIZE:
+-      *settings_id_string = "SETTINGS_MAX_HEADER_LIST_SIZE";
+-      return true;
+-  }
+-
+-  *settings_id_string = "SETTINGS_UNKNOWN";
+-  return false;
+-}
+-
+-SpdyErrorCode ParseErrorCode(uint32_t wire_error_code) {
+-  if (wire_error_code > ERROR_CODE_MAX) {
+-    return ERROR_CODE_INTERNAL_ERROR;
+-  }
+-
+-  return static_cast<SpdyErrorCode>(wire_error_code);
+-}
+-
+-const char* ErrorCodeToString(SpdyErrorCode error_code) {
+-  switch (error_code) {
+-    case ERROR_CODE_NO_ERROR:
+-      return "NO_ERROR";
+-    case ERROR_CODE_PROTOCOL_ERROR:
+-      return "PROTOCOL_ERROR";
+-    case ERROR_CODE_INTERNAL_ERROR:
+-      return "INTERNAL_ERROR";
+-    case ERROR_CODE_FLOW_CONTROL_ERROR:
+-      return "FLOW_CONTROL_ERROR";
+-    case ERROR_CODE_SETTINGS_TIMEOUT:
+-      return "SETTINGS_TIMEOUT";
+-    case ERROR_CODE_STREAM_CLOSED:
+-      return "STREAM_CLOSED";
+-    case ERROR_CODE_FRAME_SIZE_ERROR:
+-      return "FRAME_SIZE_ERROR";
+-    case ERROR_CODE_REFUSED_STREAM:
+-      return "REFUSED_STREAM";
+-    case ERROR_CODE_CANCEL:
+-      return "CANCEL";
+-    case ERROR_CODE_COMPRESSION_ERROR:
+-      return "COMPRESSION_ERROR";
+-    case ERROR_CODE_CONNECT_ERROR:
+-      return "CONNECT_ERROR";
+-    case ERROR_CODE_ENHANCE_YOUR_CALM:
+-      return "ENHANCE_YOUR_CALM";
+-    case ERROR_CODE_INADEQUATE_SECURITY:
+-      return "INADEQUATE_SECURITY";
+-    case ERROR_CODE_HTTP_1_1_REQUIRED:
+-      return "HTTP_1_1_REQUIRED";
+-  }
+-  return "UNKNOWN_ERROR_CODE";
+-}
+-
+-const char* const kHttp2Npn = "h2";
+-
+-const char* const kHttp2AuthorityHeader = ":authority";
+-const char* const kHttp2MethodHeader = ":method";
+-const char* const kHttp2PathHeader = ":path";
+-const char* const kHttp2SchemeHeader = ":scheme";
+-
+-const char* const kHttp2StatusHeader = ":status";
+-
+-bool SpdyFrameIR::fin() const {
+-  return false;
+-}
+-
+-int SpdyFrameIR::flow_control_window_consumed() const {
+-  return 0;
+-}
+-
+-bool SpdyFrameWithFinIR::fin() const {
+-  return fin_;
+-}
+-
+-SpdyFrameWithHeaderBlockIR::SpdyFrameWithHeaderBlockIR(
+-    SpdyStreamId stream_id,
+-    SpdyHeaderBlock header_block)
+-    : SpdyFrameWithFinIR(stream_id), header_block_(std::move(header_block)) {}
+-
+-SpdyFrameWithHeaderBlockIR::~SpdyFrameWithHeaderBlockIR() = default;
+-
+-SpdyDataIR::SpdyDataIR(SpdyStreamId stream_id, SpdyStringPiece data)
+-    : SpdyFrameWithFinIR(stream_id),
+-      data_(nullptr),
+-      data_len_(0),
+-      padded_(false),
+-      padding_payload_len_(0) {
+-  SetDataDeep(data);
+-}
+-
+-SpdyDataIR::SpdyDataIR(SpdyStreamId stream_id, const char* data)
+-    : SpdyDataIR(stream_id, SpdyStringPiece(data)) {}
+-
+-SpdyDataIR::SpdyDataIR(SpdyStreamId stream_id, SpdyString data)
+-    : SpdyFrameWithFinIR(stream_id),
+-      data_store_(SpdyMakeUnique<SpdyString>(std::move(data))),
+-      data_(data_store_->data()),
+-      data_len_(data_store_->size()),
+-      padded_(false),
+-      padding_payload_len_(0) {}
+-
+-SpdyDataIR::SpdyDataIR(SpdyStreamId stream_id)
+-    : SpdyFrameWithFinIR(stream_id),
+-      data_(nullptr),
+-      data_len_(0),
+-      padded_(false),
+-      padding_payload_len_(0) {}
+-
+-SpdyDataIR::~SpdyDataIR() = default;
+-
+-void SpdyDataIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitData(*this);
+-}
+-
+-SpdyFrameType SpdyDataIR::frame_type() const {
+-  return SpdyFrameType::DATA;
+-}
+-
+-int SpdyDataIR::flow_control_window_consumed() const {
+-  return padded() ? 1 + padding_payload_len() + data_len() : data_len();
+-}
+-
+-SpdyRstStreamIR::SpdyRstStreamIR(SpdyStreamId stream_id,
+-                                 SpdyErrorCode error_code)
+-    : SpdyFrameIR(stream_id) {
+-  set_error_code(error_code);
+-}
+-
+-SpdyRstStreamIR::~SpdyRstStreamIR() = default;
+-
+-void SpdyRstStreamIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitRstStream(*this);
+-}
+-
+-SpdyFrameType SpdyRstStreamIR::frame_type() const {
+-  return SpdyFrameType::RST_STREAM;
+-}
+-
+-SpdySettingsIR::SpdySettingsIR() : is_ack_(false) {}
+-
+-SpdySettingsIR::~SpdySettingsIR() = default;
+-
+-void SpdySettingsIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitSettings(*this);
+-}
+-
+-SpdyFrameType SpdySettingsIR::frame_type() const {
+-  return SpdyFrameType::SETTINGS;
+-}
+-
+-void SpdyPingIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitPing(*this);
+-}
+-
+-SpdyFrameType SpdyPingIR::frame_type() const {
+-  return SpdyFrameType::PING;
+-}
+-
+-SpdyGoAwayIR::SpdyGoAwayIR(SpdyStreamId last_good_stream_id,
+-                           SpdyErrorCode error_code,
+-                           SpdyStringPiece description)
+-    : description_(description) {
+-  set_last_good_stream_id(last_good_stream_id);
+-  set_error_code(error_code);
+-}
+-
+-SpdyGoAwayIR::SpdyGoAwayIR(SpdyStreamId last_good_stream_id,
+-                           SpdyErrorCode error_code,
+-                           const char* description)
+-    : SpdyGoAwayIR(last_good_stream_id,
+-                   error_code,
+-                   SpdyStringPiece(description)) {}
+-
+-SpdyGoAwayIR::SpdyGoAwayIR(SpdyStreamId last_good_stream_id,
+-                           SpdyErrorCode error_code,
+-                           SpdyString description)
+-    : description_store_(std::move(description)),
+-      description_(description_store_) {
+-  set_last_good_stream_id(last_good_stream_id);
+-  set_error_code(error_code);
+-}
+-
+-SpdyGoAwayIR::~SpdyGoAwayIR() = default;
+-
+-void SpdyGoAwayIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitGoAway(*this);
+-}
+-
+-SpdyFrameType SpdyGoAwayIR::frame_type() const {
+-  return SpdyFrameType::GOAWAY;
+-}
+-
+-SpdyContinuationIR::SpdyContinuationIR(SpdyStreamId stream_id)
+-    : SpdyFrameIR(stream_id), end_headers_(false) {
+-  encoding_ = SpdyMakeUnique<SpdyString>();
+-}
+-
+-SpdyContinuationIR::~SpdyContinuationIR() = default;
+-
+-void SpdyContinuationIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitContinuation(*this);
+-}
+-
+-SpdyFrameType SpdyContinuationIR::frame_type() const {
+-  return SpdyFrameType::CONTINUATION;
+-}
+-
+-void SpdyHeadersIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitHeaders(*this);
+-}
+-
+-SpdyFrameType SpdyHeadersIR::frame_type() const {
+-  return SpdyFrameType::HEADERS;
+-}
+-
+-void SpdyWindowUpdateIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitWindowUpdate(*this);
+-}
+-
+-SpdyFrameType SpdyWindowUpdateIR::frame_type() const {
+-  return SpdyFrameType::WINDOW_UPDATE;
+-}
+-
+-void SpdyPushPromiseIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitPushPromise(*this);
+-}
+-
+-SpdyFrameType SpdyPushPromiseIR::frame_type() const {
+-  return SpdyFrameType::PUSH_PROMISE;
+-}
+-
+-SpdyAltSvcIR::SpdyAltSvcIR(SpdyStreamId stream_id) : SpdyFrameIR(stream_id) {}
+-
+-SpdyAltSvcIR::~SpdyAltSvcIR() = default;
+-
+-void SpdyAltSvcIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitAltSvc(*this);
+-}
+-
+-SpdyFrameType SpdyAltSvcIR::frame_type() const {
+-  return SpdyFrameType::ALTSVC;
+-}
+-
+-void SpdyPriorityIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitPriority(*this);
+-}
+-
+-SpdyFrameType SpdyPriorityIR::frame_type() const {
+-  return SpdyFrameType::PRIORITY;
+-}
+-
+-void SpdyUnknownIR::Visit(SpdyFrameVisitor* visitor) const {
+-  return visitor->VisitUnknown(*this);
+-}
+-
+-SpdyFrameType SpdyUnknownIR::frame_type() const {
+-  return static_cast<SpdyFrameType>(type());
+-}
+-
+-int SpdyUnknownIR::flow_control_window_consumed() const {
+-  if (frame_type() == SpdyFrameType::DATA) {
+-    return payload_.size();
+-  } else {
+-    return 0;
+-  }
+-}
+-
+-// Wire size of pad length field.
+-const size_t kPadLengthFieldSize = 1;
+-
+-size_t GetHeaderFrameSizeSansBlock(const SpdyHeadersIR& header_ir) {
+-  size_t min_size = kFrameHeaderSize;
+-  if (header_ir.padded()) {
+-    min_size += kPadLengthFieldSize;
+-    min_size += header_ir.padding_payload_len();
+-  }
+-  if (header_ir.has_priority()) {
+-    min_size += 5;
+-  }
+-  return min_size;
+-}
+-
+-size_t GetPushPromiseFrameSizeSansBlock(
+-    const SpdyPushPromiseIR& push_promise_ir) {
+-  size_t min_size = kPushPromiseFrameMinimumSize;
+-  if (push_promise_ir.padded()) {
+-    min_size += kPadLengthFieldSize;
+-    min_size += push_promise_ir.padding_payload_len();
+-  }
+-  return min_size;
+-}
+-
+ }  // namespace net
+diff --git a/spdy/core/spdy_protocol.h b/spdy/core/spdy_protocol.h
+index 8b806a9..05aa543 100644
+--- a/spdy/core/spdy_protocol.h
++++ b/spdy/core/spdy_protocol.h
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++// <PUIC-PATCH>
++
+ // This file contains some protocol structures for use with SPDY 3 and HTTP 2
+ // The SPDY 3 spec can be found at:
+ // http://dev.chromium.org/spdy/spdy-protocol/spdy-protocol-draft3
+@@ -19,18 +21,7 @@
+ #include <new>
+ #include <utility>
+ 
+-#include "base/compiler_specific.h"
+-#include "base/logging.h"
+-#include "base/macros.h"
+-#include "base/sys_byteorder.h"
+-#include "net/spdy/core/spdy_alt_svc_wire_format.h"
+-#include "net/spdy/core/spdy_bitmasks.h"
+-#include "net/spdy/core/spdy_bug_tracker.h"
+-#include "net/spdy/core/spdy_header_block.h"
+ #include "net/spdy/platform/api/spdy_export.h"
+-#include "net/spdy/platform/api/spdy_ptr_util.h"
+-#include "net/spdy/platform/api/spdy_string.h"
+-#include "net/spdy/platform/api/spdy_string_piece.h"
+ 
+ namespace net {
+ 
+@@ -44,146 +35,6 @@ const SpdyStreamId kSessionFlowControlStreamId = 0;
+ // Max stream id.
+ const SpdyStreamId kMaxStreamId = 0x7fffffff;
+ 
+-// The maximum possible frame payload size allowed by the spec.
+-const uint32_t kSpdyMaxFrameSizeLimit = (1 << 24) - 1;
+-
+-// The initial value for the maximum frame payload size as per the spec. This is
+-// the maximum control frame size we accept.
+-const uint32_t kHttp2DefaultFramePayloadLimit = 1 << 14;
+-
+-// Number of octets in the frame header.
+-const size_t kFrameHeaderSize = 9;
+-
+-// The initial value for the maximum frame payload size as per the spec. This is
+-// the maximum control frame size we accept.
+-const uint32_t kHttp2DefaultFrameSizeLimit =
+-    kHttp2DefaultFramePayloadLimit + kFrameHeaderSize;
+-
+-// The initial value for the maximum size of the header list, "unlimited" (max
+-// unsigned 32-bit int) as per the spec.
+-const uint32_t kSpdyInitialHeaderListSizeLimit = 0xFFFFFFFF;
+-
+-// Maximum window size for a Spdy stream or session.
+-const int32_t kSpdyMaximumWindowSize = 0x7FFFFFFF;  // Max signed 32bit int
+-
+-// Maximum padding size in octets for one DATA or HEADERS or PUSH_PROMISE frame.
+-const int32_t kPaddingSizePerFrame = 256;
+-
+-// The HTTP/2 connection preface, which must be the first bytes sent by the
+-// client upon starting an HTTP/2 connection, and which must be followed by a
+-// SETTINGS frame.  Note that even though |kHttp2ConnectionHeaderPrefix| is
+-// defined as a string literal with a null terminator, the actual connection
+-// preface is only the first |kHttp2ConnectionHeaderPrefixSize| bytes, which
+-// excludes the null terminator.
+-SPDY_EXPORT_PRIVATE extern const char* const kHttp2ConnectionHeaderPrefix;
+-const int kHttp2ConnectionHeaderPrefixSize = 24;
+-
+-// Wire values for HTTP2 frame types.
+-enum class SpdyFrameType : uint8_t {
+-  DATA = 0x00,
+-  HEADERS = 0x01,
+-  PRIORITY = 0x02,
+-  RST_STREAM = 0x03,
+-  SETTINGS = 0x04,
+-  PUSH_PROMISE = 0x05,
+-  PING = 0x06,
+-  GOAWAY = 0x07,
+-  WINDOW_UPDATE = 0x08,
+-  CONTINUATION = 0x09,
+-  // ALTSVC is a public extension.
+-  ALTSVC = 0x0a,
+-  MAX_FRAME_TYPE = ALTSVC,
+-  // The specific value of EXTENSION is meaningless; it is a placeholder used
+-  // within SpdyFramer's state machine when handling unknown frames via an
+-  // extension API.
+-  // TODO(birenroy): Remove the fake EXTENSION value from the SpdyFrameType
+-  // enum.
+-  EXTENSION = 0xff
+-};
+-
+-// Flags on data packets.
+-enum SpdyDataFlags {
+-  DATA_FLAG_NONE = 0x00,
+-  DATA_FLAG_FIN = 0x01,
+-  DATA_FLAG_PADDED = 0x08,
+-};
+-
+-// Flags on control packets
+-enum SpdyControlFlags {
+-  CONTROL_FLAG_NONE = 0x00,
+-  CONTROL_FLAG_FIN = 0x01,
+-  CONTROL_FLAG_UNIDIRECTIONAL = 0x02,
+-};
+-
+-enum SpdyPingFlags {
+-  PING_FLAG_ACK = 0x01,
+-};
+-
+-// Used by HEADERS, PUSH_PROMISE, and CONTINUATION.
+-enum SpdyHeadersFlags {
+-  HEADERS_FLAG_END_HEADERS = 0x04,
+-  HEADERS_FLAG_PADDED = 0x08,
+-  HEADERS_FLAG_PRIORITY = 0x20,
+-};
+-
+-enum SpdyPushPromiseFlags {
+-  PUSH_PROMISE_FLAG_END_PUSH_PROMISE = 0x04,
+-  PUSH_PROMISE_FLAG_PADDED = 0x08,
+-};
+-
+-enum Http2SettingsControlFlags {
+-  SETTINGS_FLAG_ACK = 0x01,
+-};
+-
+-// Wire values of HTTP/2 setting identifiers.
+-enum SpdySettingsIds : uint16_t {
+-  // HPACK header table maximum size.
+-  SETTINGS_HEADER_TABLE_SIZE = 0x1,
+-  SETTINGS_MIN = SETTINGS_HEADER_TABLE_SIZE,
+-  // Whether or not server push (PUSH_PROMISE) is enabled.
+-  SETTINGS_ENABLE_PUSH = 0x2,
+-  // The maximum number of simultaneous live streams in each direction.
+-  SETTINGS_MAX_CONCURRENT_STREAMS = 0x3,
+-  // Initial window size in bytes
+-  SETTINGS_INITIAL_WINDOW_SIZE = 0x4,
+-  // The size of the largest frame payload that a receiver is willing to accept.
+-  SETTINGS_MAX_FRAME_SIZE = 0x5,
+-  // The maximum size of header list that the sender is prepared to accept.
+-  SETTINGS_MAX_HEADER_LIST_SIZE = 0x6,
+-  SETTINGS_MAX = SETTINGS_MAX_HEADER_LIST_SIZE
+-};
+-
+-// This explicit operator is needed, otherwise compiler finds
+-// overloaded operator to be ambiguous.
+-SPDY_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& out,
+-                                             SpdySettingsIds id);
+-
+-// This operator is needed, because SpdyFrameType is an enum class,
+-// therefore implicit conversion to underlying integer type is not allowed.
+-SPDY_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& out,
+-                                             SpdyFrameType frame_type);
+-
+-using SettingsMap = std::map<SpdySettingsIds, uint32_t>;
+-
+-// HTTP/2 error codes, RFC 7540 Section 7.
+-enum SpdyErrorCode : uint32_t {
+-  ERROR_CODE_NO_ERROR = 0x0,
+-  ERROR_CODE_PROTOCOL_ERROR = 0x1,
+-  ERROR_CODE_INTERNAL_ERROR = 0x2,
+-  ERROR_CODE_FLOW_CONTROL_ERROR = 0x3,
+-  ERROR_CODE_SETTINGS_TIMEOUT = 0x4,
+-  ERROR_CODE_STREAM_CLOSED = 0x5,
+-  ERROR_CODE_FRAME_SIZE_ERROR = 0x6,
+-  ERROR_CODE_REFUSED_STREAM = 0x7,
+-  ERROR_CODE_CANCEL = 0x8,
+-  ERROR_CODE_COMPRESSION_ERROR = 0x9,
+-  ERROR_CODE_CONNECT_ERROR = 0xa,
+-  ERROR_CODE_ENHANCE_YOUR_CALM = 0xb,
+-  ERROR_CODE_INADEQUATE_SECURITY = 0xc,
+-  ERROR_CODE_HTTP_1_1_REQUIRED = 0xd,
+-  ERROR_CODE_MAX = ERROR_CODE_HTTP_1_1_REQUIRED
+-};
+-
+ // A SPDY priority is a number between 0 and 7 (inclusive).
+ typedef uint8_t SpdyPriority;
+ 
+@@ -220,96 +71,6 @@ SPDY_EXPORT_PRIVATE SpdyPriority Http2WeightToSpdy3Priority(int weight);
+ // in RFC 7540 section 5.3.1.
+ const unsigned int kHttp2RootStreamId = 0;
+ 
+-typedef uint64_t SpdyPingId;
+-
+-// Returns true if a given on-the-wire enumeration of a frame type is defined
+-// in a standardized HTTP/2 specification, false otherwise.
+-SPDY_EXPORT_PRIVATE bool IsDefinedFrameType(uint8_t frame_type_field);
+-
+-// Parses a frame type from an on-the-wire enumeration.
+-// Behavior is undefined for invalid frame type fields; consumers should first
+-// use IsValidFrameType() to verify validity of frame type fields.
+-SPDY_EXPORT_PRIVATE SpdyFrameType ParseFrameType(uint8_t frame_type_field);
+-
+-// Serializes a frame type to the on-the-wire value.
+-SPDY_EXPORT_PRIVATE uint8_t SerializeFrameType(SpdyFrameType frame_type);
+-
+-// (HTTP/2) All standard frame types except WINDOW_UPDATE are
+-// (stream-specific xor connection-level). Returns false iff we know
+-// the given frame type does not align with the given streamID.
+-SPDY_EXPORT_PRIVATE bool IsValidHTTP2FrameStreamId(
+-    SpdyStreamId current_frame_stream_id,
+-    SpdyFrameType frame_type_field);
+-
+-// Serialize |frame_type| to string for logging/debugging.
+-const char* FrameTypeToString(SpdyFrameType frame_type);
+-
+-// If |wire_setting_id| is the on-the-wire representation of a defined SETTINGS
+-// parameter, parse it to |*setting_id| and return true.
+-SPDY_EXPORT_PRIVATE bool ParseSettingsId(uint16_t wire_setting_id,
+-                                         SpdySettingsIds* setting_id);
+-
+-// Return if |id| corresponds to a defined setting;
+-// stringify |id| to |*settings_id_string| regardless.
+-SPDY_EXPORT_PRIVATE bool SettingsIdToString(SpdySettingsIds id,
+-                                            const char** settings_id_string);
+-
+-// Parse |wire_error_code| to a SpdyErrorCode.
+-// Treat unrecognized error codes as INTERNAL_ERROR
+-// as recommended by the HTTP/2 specification.
+-SPDY_EXPORT_PRIVATE SpdyErrorCode ParseErrorCode(uint32_t wire_error_code);
+-
+-// Serialize RST_STREAM or GOAWAY frame error code to string
+-// for logging/debugging.
+-const char* ErrorCodeToString(SpdyErrorCode error_code);
+-
+-// Minimum size of a frame, in octets.
+-const size_t kFrameMinimumSize = kFrameHeaderSize;
+-
+-// Minimum frame size for variable size frame types (includes mandatory fields),
+-// frame size for fixed size frames, in octets.
+-
+-const size_t kDataFrameMinimumSize = kFrameHeaderSize;
+-const size_t kHeadersFrameMinimumSize = kFrameHeaderSize;
+-// PRIORITY frame has stream_dependency (4 octets) and weight (1 octet) fields.
+-const size_t kPriorityFrameSize = kFrameHeaderSize + 5;
+-// RST_STREAM frame has error_code (4 octets) field.
+-const size_t kRstStreamFrameSize = kFrameHeaderSize + 4;
+-const size_t kSettingsFrameMinimumSize = kFrameHeaderSize;
+-// PUSH_PROMISE frame has promised_stream_id (4 octet) field.
+-const size_t kPushPromiseFrameMinimumSize = kFrameHeaderSize + 4;
+-// PING frame has opaque_bytes (8 octet) field.
+-const size_t kPingFrameSize = kFrameHeaderSize + 8;
+-// GOAWAY frame has last_stream_id (4 octet) and error_code (4 octet) fields.
+-const size_t kGoawayFrameMinimumSize = kFrameHeaderSize + 8;
+-// WINDOW_UPDATE frame has window_size_increment (4 octet) field.
+-const size_t kWindowUpdateFrameSize = kFrameHeaderSize + 4;
+-const size_t kContinuationFrameMinimumSize = kFrameHeaderSize;
+-// ALTSVC frame has origin_len (2 octets) field.
+-const size_t kGetAltSvcFrameMinimumSize = kFrameHeaderSize + 2;
+-
+-// Maximum possible configurable size of a frame in octets.
+-const size_t kMaxFrameSizeLimit = kSpdyMaxFrameSizeLimit + kFrameHeaderSize;
+-// Size of a header block size field.
+-const size_t kSizeOfSizeField = sizeof(uint32_t);
+-// Per-header overhead for block size accounting in bytes.
+-const size_t kPerHeaderOverhead = 32;
+-// Initial window size for a stream in bytes.
+-const int32_t kInitialStreamWindowSize = 64 * 1024 - 1;
+-// Initial window size for a session in bytes.
+-const int32_t kInitialSessionWindowSize = 64 * 1024 - 1;
+-// The NPN string for HTTP2, "h2".
+-extern const char* const kHttp2Npn;
+-
+-// Names of pseudo-headers defined for HTTP/2 requests.
+-SPDY_EXPORT_PRIVATE extern const char* const kHttp2AuthorityHeader;
+-SPDY_EXPORT_PRIVATE extern const char* const kHttp2MethodHeader;
+-SPDY_EXPORT_PRIVATE extern const char* const kHttp2PathHeader;
+-SPDY_EXPORT_PRIVATE extern const char* const kHttp2SchemeHeader;
+-
+-// Name of pseudo-header defined for HTTP/2 responses.
+-SPDY_EXPORT_PRIVATE extern const char* const kHttp2StatusHeader;
+-
+ // Variant type (i.e. tagged union) that is either a SPDY 3.x priority value,
+ // or else an HTTP/2 stream dependency tuple {parent stream ID, weight,
+ // exclusive bit}. Templated to allow for use by QUIC code; SPDY and HTTP/2
+@@ -406,608 +167,6 @@ class StreamPrecedence {
+ 
+ typedef StreamPrecedence<SpdyStreamId> SpdyStreamPrecedence;
+ 
+-class SpdyFrameVisitor;
+-
+-// Intermediate representation for HTTP2 frames.
+-class SPDY_EXPORT_PRIVATE SpdyFrameIR {
+- public:
+-  virtual ~SpdyFrameIR() {}
+-
+-  virtual void Visit(SpdyFrameVisitor* visitor) const = 0;
+-  virtual SpdyFrameType frame_type() const = 0;
+-  SpdyStreamId stream_id() const { return stream_id_; }
+-  virtual bool fin() const;
+-
+-  // Returns the number of bytes of flow control window that would be consumed
+-  // by this frame if written to the wire.
+-  virtual int flow_control_window_consumed() const;
+-
+- protected:
+-  SpdyFrameIR() : stream_id_(0) {}
+-  explicit SpdyFrameIR(SpdyStreamId stream_id) : stream_id_(stream_id) {}
+-
+- private:
+-  SpdyStreamId stream_id_;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdyFrameIR);
+-};
+-
+-// Abstract class intended to be inherited by IRs that have the option of a FIN
+-// flag.
+-class SPDY_EXPORT_PRIVATE SpdyFrameWithFinIR : public SpdyFrameIR {
+- public:
+-  ~SpdyFrameWithFinIR() override {}
+-  bool fin() const override;
+-  void set_fin(bool fin) { fin_ = fin; }
+-
+- protected:
+-  explicit SpdyFrameWithFinIR(SpdyStreamId stream_id)
+-      : SpdyFrameIR(stream_id), fin_(false) {}
+-
+- private:
+-  bool fin_;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdyFrameWithFinIR);
+-};
+-
+-// Abstract class intended to be inherited by IRs that contain a header
+-// block. Implies SpdyFrameWithFinIR.
+-class SPDY_EXPORT_PRIVATE SpdyFrameWithHeaderBlockIR
+-    : public SpdyFrameWithFinIR {
+- public:
+-  ~SpdyFrameWithHeaderBlockIR() override;
+-
+-  const SpdyHeaderBlock& header_block() const { return header_block_; }
+-  void set_header_block(SpdyHeaderBlock header_block) {
+-    // Deep copy.
+-    header_block_ = std::move(header_block);
+-  }
+-  void SetHeader(SpdyStringPiece name, SpdyStringPiece value) {
+-    header_block_[name] = value;
+-  }
+-
+- protected:
+-  SpdyFrameWithHeaderBlockIR(SpdyStreamId stream_id,
+-                             SpdyHeaderBlock header_block);
+-
+- private:
+-  SpdyHeaderBlock header_block_;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdyFrameWithHeaderBlockIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdyDataIR : public SpdyFrameWithFinIR {
+- public:
+-  // Performs a deep copy on data.
+-  SpdyDataIR(SpdyStreamId stream_id, SpdyStringPiece data);
+-
+-  // Performs a deep copy on data.
+-  SpdyDataIR(SpdyStreamId stream_id, const char* data);
+-
+-  // Moves data into data_store_. Makes a copy if passed a non-movable string.
+-  SpdyDataIR(SpdyStreamId stream_id, SpdyString data);
+-
+-  // Use in conjunction with SetDataShallow() for shallow-copy on data.
+-  explicit SpdyDataIR(SpdyStreamId stream_id);
+-
+-  ~SpdyDataIR() override;
+-
+-  const char* data() const { return data_; }
+-  size_t data_len() const { return data_len_; }
+-
+-  bool padded() const { return padded_; }
+-
+-  int padding_payload_len() const { return padding_payload_len_; }
+-
+-  void set_padding_len(int padding_len) {
+-    DCHECK_GT(padding_len, 0);
+-    DCHECK_LE(padding_len, kPaddingSizePerFrame);
+-    padded_ = true;
+-    // The pad field takes one octet on the wire.
+-    padding_payload_len_ = padding_len - 1;
+-  }
+-
+-  // Deep-copy of data (keep private copy).
+-  void SetDataDeep(SpdyStringPiece data) {
+-    data_store_ = SpdyMakeUnique<SpdyString>(data.data(), data.size());
+-    data_ = data_store_->data();
+-    data_len_ = data.size();
+-  }
+-
+-  // Shallow-copy of data (do not keep private copy).
+-  void SetDataShallow(SpdyStringPiece data) {
+-    data_store_.reset();
+-    data_ = data.data();
+-    data_len_ = data.size();
+-  }
+-
+-  // Use this method if we don't have a contiguous buffer and only
+-  // need a length.
+-  void SetDataShallow(size_t len) {
+-    data_store_.reset();
+-    data_ = nullptr;
+-    data_len_ = len;
+-  }
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+-  int flow_control_window_consumed() const override;
+-
+- private:
+-  // Used to store data that this SpdyDataIR should own.
+-  std::unique_ptr<SpdyString> data_store_;
+-  const char* data_;
+-  size_t data_len_;
+-
+-  bool padded_;
+-  // padding_payload_len_ = desired padding length - len(padding length field).
+-  int padding_payload_len_;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdyDataIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdyRstStreamIR : public SpdyFrameIR {
+- public:
+-  SpdyRstStreamIR(SpdyStreamId stream_id, SpdyErrorCode error_code);
+-
+-  ~SpdyRstStreamIR() override;
+-
+-  SpdyErrorCode error_code() const { return error_code_; }
+-  void set_error_code(SpdyErrorCode error_code) { error_code_ = error_code; }
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+- private:
+-  SpdyErrorCode error_code_;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdyRstStreamIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdySettingsIR : public SpdyFrameIR {
+- public:
+-  SpdySettingsIR();
+-  ~SpdySettingsIR() override;
+-
+-  // Overwrites as appropriate.
+-  const SettingsMap& values() const { return values_; }
+-  void AddSetting(SpdySettingsIds id, int32_t value) { values_[id] = value; }
+-
+-  bool is_ack() const { return is_ack_; }
+-  void set_is_ack(bool is_ack) { is_ack_ = is_ack; }
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+- private:
+-  SettingsMap values_;
+-  bool is_ack_;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdySettingsIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdyPingIR : public SpdyFrameIR {
+- public:
+-  explicit SpdyPingIR(SpdyPingId id) : id_(id), is_ack_(false) {}
+-  SpdyPingId id() const { return id_; }
+-
+-  bool is_ack() const { return is_ack_; }
+-  void set_is_ack(bool is_ack) { is_ack_ = is_ack; }
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+- private:
+-  SpdyPingId id_;
+-  bool is_ack_;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdyPingIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdyGoAwayIR : public SpdyFrameIR {
+- public:
+-  // References description, doesn't copy it, so description must outlast
+-  // this SpdyGoAwayIR.
+-  SpdyGoAwayIR(SpdyStreamId last_good_stream_id,
+-               SpdyErrorCode error_code,
+-               SpdyStringPiece description);
+-
+-  // References description, doesn't copy it, so description must outlast
+-  // this SpdyGoAwayIR.
+-  SpdyGoAwayIR(SpdyStreamId last_good_stream_id,
+-               SpdyErrorCode error_code,
+-               const char* description);
+-
+-  // Moves description into description_store_, so caller doesn't need to
+-  // keep description live after constructing this SpdyGoAwayIR.
+-  SpdyGoAwayIR(SpdyStreamId last_good_stream_id,
+-               SpdyErrorCode error_code,
+-               SpdyString description);
+-
+-  ~SpdyGoAwayIR() override;
+-
+-  SpdyStreamId last_good_stream_id() const { return last_good_stream_id_; }
+-  void set_last_good_stream_id(SpdyStreamId last_good_stream_id) {
+-    DCHECK_EQ(0u, last_good_stream_id & ~kStreamIdMask);
+-    last_good_stream_id_ = last_good_stream_id;
+-  }
+-  SpdyErrorCode error_code() const { return error_code_; }
+-  void set_error_code(SpdyErrorCode error_code) {
+-    // TODO(hkhalil): Check valid ranges of error_code?
+-    error_code_ = error_code;
+-  }
+-
+-  const SpdyStringPiece& description() const { return description_; }
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+- private:
+-  SpdyStreamId last_good_stream_id_;
+-  SpdyErrorCode error_code_;
+-  const SpdyString description_store_;
+-  const SpdyStringPiece description_;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdyGoAwayIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdyHeadersIR : public SpdyFrameWithHeaderBlockIR {
+- public:
+-  explicit SpdyHeadersIR(SpdyStreamId stream_id)
+-      : SpdyHeadersIR(stream_id, SpdyHeaderBlock()) {}
+-  SpdyHeadersIR(SpdyStreamId stream_id, SpdyHeaderBlock header_block)
+-      : SpdyFrameWithHeaderBlockIR(stream_id, std::move(header_block)) {}
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+-  bool has_priority() const { return has_priority_; }
+-  void set_has_priority(bool has_priority) { has_priority_ = has_priority; }
+-  int weight() const { return weight_; }
+-  void set_weight(int weight) { weight_ = weight; }
+-  SpdyStreamId parent_stream_id() const { return parent_stream_id_; }
+-  void set_parent_stream_id(SpdyStreamId id) { parent_stream_id_ = id; }
+-  bool exclusive() const { return exclusive_; }
+-  void set_exclusive(bool exclusive) { exclusive_ = exclusive; }
+-  bool padded() const { return padded_; }
+-  int padding_payload_len() const { return padding_payload_len_; }
+-  void set_padding_len(int padding_len) {
+-    DCHECK_GT(padding_len, 0);
+-    DCHECK_LE(padding_len, kPaddingSizePerFrame);
+-    padded_ = true;
+-    // The pad field takes one octet on the wire.
+-    padding_payload_len_ = padding_len - 1;
+-  }
+-
+- private:
+-  bool has_priority_ = false;
+-  int weight_ = kHttp2DefaultStreamWeight;
+-  SpdyStreamId parent_stream_id_ = 0;
+-  bool exclusive_ = false;
+-  bool padded_ = false;
+-  int padding_payload_len_ = 0;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdyHeadersIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdyWindowUpdateIR : public SpdyFrameIR {
+- public:
+-  SpdyWindowUpdateIR(SpdyStreamId stream_id, int32_t delta)
+-      : SpdyFrameIR(stream_id) {
+-    set_delta(delta);
+-  }
+-  int32_t delta() const { return delta_; }
+-  void set_delta(int32_t delta) {
+-    DCHECK_LE(0, delta);
+-    DCHECK_LE(delta, kSpdyMaximumWindowSize);
+-    delta_ = delta;
+-  }
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+- private:
+-  int32_t delta_;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdyWindowUpdateIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdyPushPromiseIR
+-    : public SpdyFrameWithHeaderBlockIR {
+- public:
+-  SpdyPushPromiseIR(SpdyStreamId stream_id, SpdyStreamId promised_stream_id)
+-      : SpdyPushPromiseIR(stream_id, promised_stream_id, SpdyHeaderBlock()) {}
+-  SpdyPushPromiseIR(SpdyStreamId stream_id,
+-                    SpdyStreamId promised_stream_id,
+-                    SpdyHeaderBlock header_block)
+-      : SpdyFrameWithHeaderBlockIR(stream_id, std::move(header_block)),
+-        promised_stream_id_(promised_stream_id),
+-        padded_(false),
+-        padding_payload_len_(0) {}
+-  SpdyStreamId promised_stream_id() const { return promised_stream_id_; }
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+-  bool padded() const { return padded_; }
+-  int padding_payload_len() const { return padding_payload_len_; }
+-  void set_padding_len(int padding_len) {
+-    DCHECK_GT(padding_len, 0);
+-    DCHECK_LE(padding_len, kPaddingSizePerFrame);
+-    padded_ = true;
+-    // The pad field takes one octet on the wire.
+-    padding_payload_len_ = padding_len - 1;
+-  }
+-
+- private:
+-  SpdyStreamId promised_stream_id_;
+-
+-  bool padded_;
+-  int padding_payload_len_;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdyPushPromiseIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdyContinuationIR : public SpdyFrameIR {
+- public:
+-  explicit SpdyContinuationIR(SpdyStreamId stream_id);
+-  ~SpdyContinuationIR() override;
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+-  bool end_headers() const { return end_headers_; }
+-  void set_end_headers(bool end_headers) { end_headers_ = end_headers; }
+-  const SpdyString& encoding() const { return *encoding_; }
+-  void take_encoding(std::unique_ptr<SpdyString> encoding) {
+-    encoding_ = std::move(encoding);
+-  }
+-
+- private:
+-  std::unique_ptr<SpdyString> encoding_;
+-  bool end_headers_;
+-  DISALLOW_COPY_AND_ASSIGN(SpdyContinuationIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdyAltSvcIR : public SpdyFrameIR {
+- public:
+-  explicit SpdyAltSvcIR(SpdyStreamId stream_id);
+-  ~SpdyAltSvcIR() override;
+-
+-  SpdyString origin() const { return origin_; }
+-  const SpdyAltSvcWireFormat::AlternativeServiceVector& altsvc_vector() const {
+-    return altsvc_vector_;
+-  }
+-
+-  void set_origin(SpdyString origin) { origin_ = std::move(origin); }
+-  void add_altsvc(const SpdyAltSvcWireFormat::AlternativeService& altsvc) {
+-    altsvc_vector_.push_back(altsvc);
+-  }
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+- private:
+-  SpdyString origin_;
+-  SpdyAltSvcWireFormat::AlternativeServiceVector altsvc_vector_;
+-  DISALLOW_COPY_AND_ASSIGN(SpdyAltSvcIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdyPriorityIR : public SpdyFrameIR {
+- public:
+-  SpdyPriorityIR(SpdyStreamId stream_id,
+-                 SpdyStreamId parent_stream_id,
+-                 int weight,
+-                 bool exclusive)
+-      : SpdyFrameIR(stream_id),
+-        parent_stream_id_(parent_stream_id),
+-        weight_(weight),
+-        exclusive_(exclusive) {}
+-  SpdyStreamId parent_stream_id() const { return parent_stream_id_; }
+-  int weight() const { return weight_; }
+-  bool exclusive() const { return exclusive_; }
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+- private:
+-  SpdyStreamId parent_stream_id_;
+-  int weight_;
+-  bool exclusive_;
+-  DISALLOW_COPY_AND_ASSIGN(SpdyPriorityIR);
+-};
+-
+-// Represents a frame of unrecognized type.
+-class SPDY_EXPORT_PRIVATE SpdyUnknownIR : public SpdyFrameIR {
+- public:
+-  SpdyUnknownIR(SpdyStreamId stream_id,
+-                uint8_t type,
+-                uint8_t flags,
+-                SpdyString payload)
+-      : SpdyFrameIR(stream_id),
+-        type_(type),
+-        flags_(flags),
+-        length_(payload.size()),
+-        payload_(std::move(payload)) {}
+-  uint8_t type() const { return type_; }
+-  uint8_t flags() const { return flags_; }
+-  int length() const { return length_; }
+-  const SpdyString& payload() const { return payload_; }
+-
+-  void Visit(SpdyFrameVisitor* visitor) const override;
+-
+-  SpdyFrameType frame_type() const override;
+-
+-  int flow_control_window_consumed() const override;
+-
+- protected:
+-  // Allows subclasses to overwrite the default length.
+-  void set_length(int length) { length_ = length; }
+-
+- private:
+-  uint8_t type_;
+-  uint8_t flags_;
+-  int length_;
+-  const SpdyString payload_;
+-
+-  DISALLOW_COPY_AND_ASSIGN(SpdyUnknownIR);
+-};
+-
+-class SPDY_EXPORT_PRIVATE SpdySerializedFrame {
+- public:
+-  SpdySerializedFrame()
+-      : frame_(const_cast<char*>("")), size_(0), owns_buffer_(false) {}
+-
+-  // Create a valid SpdySerializedFrame using a pre-created buffer.
+-  // If |owns_buffer| is true, this class takes ownership of the buffer and will
+-  // delete it on cleanup.  The buffer must have been created using new char[].
+-  // If |owns_buffer| is false, the caller retains ownership of the buffer and
+-  // is responsible for making sure the buffer outlives this frame.  In other
+-  // words, this class does NOT create a copy of the buffer.
+-  SpdySerializedFrame(char* data, size_t size, bool owns_buffer)
+-      : frame_(data), size_(size), owns_buffer_(owns_buffer) {}
+-
+-  SpdySerializedFrame(SpdySerializedFrame&& other)
+-      : frame_(other.frame_),
+-        size_(other.size_),
+-        owns_buffer_(other.owns_buffer_) {
+-    // |other| is no longer responsible for the buffer.
+-    other.owns_buffer_ = false;
+-  }
+-
+-  SpdySerializedFrame& operator=(SpdySerializedFrame&& other) {
+-    // Free buffer if necessary.
+-    if (owns_buffer_) {
+-      delete[] frame_;
+-    }
+-    // Take over |other|.
+-    frame_ = other.frame_;
+-    size_ = other.size_;
+-    owns_buffer_ = other.owns_buffer_;
+-    // |other| is no longer responsible for the buffer.
+-    other.owns_buffer_ = false;
+-    return *this;
+-  }
+-
+-  ~SpdySerializedFrame() {
+-    if (owns_buffer_) {
+-      delete[] frame_;
+-    }
+-  }
+-
+-  // Provides access to the frame bytes, which is a buffer containing the frame
+-  // packed as expected for sending over the wire.
+-  char* data() const { return frame_; }
+-
+-  // Returns the actual size of the underlying buffer.
+-  size_t size() const { return size_; }
+-
+-  // Returns a buffer containing the contents of the frame, of which the caller
+-  // takes ownership, and clears this SpdySerializedFrame.
+-  char* ReleaseBuffer() {
+-    char* buffer;
+-    if (owns_buffer_) {
+-      // If the buffer is owned, relinquish ownership to the caller.
+-      buffer = frame_;
+-      owns_buffer_ = false;
+-    } else {
+-      // Otherwise, we need to make a copy to give to the caller.
+-      buffer = new char[size_];
+-      memcpy(buffer, frame_, size_);
+-    }
+-    *this = SpdySerializedFrame();
+-    return buffer;
+-  }
+-
+-  // Returns the estimate of dynamically allocated memory in bytes.
+-  size_t EstimateMemoryUsage() const { return owns_buffer_ ? size_ : 0; }
+-
+- protected:
+-  char* frame_;
+-
+- private:
+-  size_t size_;
+-  bool owns_buffer_;
+-  DISALLOW_COPY_AND_ASSIGN(SpdySerializedFrame);
+-};
+-
+-// This interface is for classes that want to process SpdyFrameIRs without
+-// having to know what type they are.  An instance of this interface can be
+-// passed to a SpdyFrameIR's Visit method, and the appropriate type-specific
+-// method of this class will be called.
+-class SPDY_EXPORT_PRIVATE SpdyFrameVisitor {
+- public:
+-  virtual void VisitRstStream(const SpdyRstStreamIR& rst_stream) = 0;
+-  virtual void VisitSettings(const SpdySettingsIR& settings) = 0;
+-  virtual void VisitPing(const SpdyPingIR& ping) = 0;
+-  virtual void VisitGoAway(const SpdyGoAwayIR& goaway) = 0;
+-  virtual void VisitHeaders(const SpdyHeadersIR& headers) = 0;
+-  virtual void VisitWindowUpdate(const SpdyWindowUpdateIR& window_update) = 0;
+-  virtual void VisitPushPromise(const SpdyPushPromiseIR& push_promise) = 0;
+-  virtual void VisitContinuation(const SpdyContinuationIR& continuation) = 0;
+-  virtual void VisitAltSvc(const SpdyAltSvcIR& altsvc) = 0;
+-  virtual void VisitPriority(const SpdyPriorityIR& priority) = 0;
+-  virtual void VisitData(const SpdyDataIR& data) = 0;
+-  virtual void VisitUnknown(const SpdyUnknownIR& unknown) {
+-    // TODO(birenroy): make abstract.
+-  }
+-
+- protected:
+-  SpdyFrameVisitor() {}
+-  virtual ~SpdyFrameVisitor() {}
+-
+- private:
+-  DISALLOW_COPY_AND_ASSIGN(SpdyFrameVisitor);
+-};
+-
+-// Optionally, and in addition to SpdyFramerVisitorInterface, a class supporting
+-// SpdyFramerDebugVisitorInterface may be used in conjunction with SpdyFramer in
+-// order to extract debug/internal information about the SpdyFramer as it
+-// operates.
+-//
+-// Most HTTP2 implementations need not bother with this interface at all.
+-class SPDY_EXPORT_PRIVATE SpdyFramerDebugVisitorInterface {
+- public:
+-  virtual ~SpdyFramerDebugVisitorInterface() {}
+-
+-  // Called after compressing a frame with a payload of
+-  // a list of name-value pairs.
+-  // |payload_len| is the uncompressed payload size.
+-  // |frame_len| is the compressed frame size.
+-  virtual void OnSendCompressedFrame(SpdyStreamId stream_id,
+-                                     SpdyFrameType type,
+-                                     size_t payload_len,
+-                                     size_t frame_len) {}
+-
+-  // Called when a frame containing a compressed payload of
+-  // name-value pairs is received.
+-  // |frame_len| is the compressed frame size.
+-  virtual void OnReceiveCompressedFrame(SpdyStreamId stream_id,
+-                                        SpdyFrameType type,
+-                                        size_t frame_len) {}
+-};
+-
+-// Calculates the number of bytes required to serialize a SpdyHeadersIR, not
+-// including the bytes to be used for the encoded header set.
+-size_t GetHeaderFrameSizeSansBlock(const SpdyHeadersIR& header_ir);
+-
+-// Calculates the number of bytes required to serialize a SpdyPushPromiseIR,
+-// not including the bytes to be used for the encoded header set.
+-size_t GetPushPromiseFrameSizeSansBlock(
+-    const SpdyPushPromiseIR& push_promise_ir);
+-
+ }  // namespace net
+ 
+ #endif  // NET_SPDY_CORE_SPDY_PROTOCOL_H_
+diff --git a/spdy/platform/api/spdy_string_utils.h b/spdy/platform/api/spdy_string_utils.h
+index 1a39058..4f986ff 100644
+--- a/spdy/platform/api/spdy_string_utils.h
++++ b/spdy/platform/api/spdy_string_utils.h
+@@ -7,14 +7,7 @@
+ 
+ #include <utility>
+ 
+-// The following header file has to be included from at least
+-// non-test file in order to avoid strange linking errors.
+-// TODO(bnc): Remove this include as soon as it is included elsewhere in
+-// non-test code.
+-#include "net/spdy/platform/api/spdy_mem_slice.h"
+-
+ #include "net/spdy/platform/api/spdy_string.h"
+-#include "net/spdy/platform/api/spdy_string_piece.h"
+ #include "net/spdy/platform/impl/spdy_string_utils_impl.h"
+ 
+ namespace net {
+@@ -43,26 +36,6 @@ inline char SpdyHexDigitToInt(char c) {
+   return SpdyHexDigitToIntImpl(c);
+ }
+ 
+-inline SpdyString SpdyHexDecode(SpdyStringPiece data) {
+-  return SpdyHexDecodeImpl(data);
+-}
+-
+-inline bool SpdyHexDecodeToUInt32(SpdyStringPiece data, uint32_t* out) {
+-  return SpdyHexDecodeToUInt32Impl(data, out);
+-}
+-
+-inline SpdyString SpdyHexEncode(const char* bytes, size_t size) {
+-  return SpdyHexEncodeImpl(bytes, size);
+-}
+-
+-inline SpdyString SpdyHexEncodeUInt32AndTrim(uint32_t data) {
+-  return SpdyHexEncodeUInt32AndTrimImpl(data);
+-}
+-
+-inline SpdyString SpdyHexDump(SpdyStringPiece data) {
+-  return SpdyHexDumpImpl(data);
+-}
+-
+ }  // namespace net
+ 
+ #endif  // NET_SPDY_PLATFORM_API_SPDY_STRING_UTILS_H_
+diff --git a/spdy/platform/impl/spdy_ptr_util_impl.h b/spdy/platform/impl/spdy_ptr_util_impl.h
+index 30936f9..bcccbc2 100644
+--- a/spdy/platform/impl/spdy_ptr_util_impl.h
++++ b/spdy/platform/impl/spdy_ptr_util_impl.h
+@@ -14,7 +14,7 @@ namespace net {
+ 
+ template <typename T, typename... Args>
+ std::unique_ptr<T> SpdyMakeUniqueImpl(Args&&... args) {
+-  return std::make_unique<T>(std::forward<Args>(args)...);
++  return base::MakeUnique<T>(std::forward<Args>(args)...);
+ }
+ 
+ template <typename T>
+diff --git a/spdy/platform/impl/spdy_string_utils_impl.h b/spdy/platform/impl/spdy_string_utils_impl.h
+index 8d1e447..8792285 100644
+--- a/spdy/platform/impl/spdy_string_utils_impl.h
++++ b/spdy/platform/impl/spdy_string_utils_impl.h
+@@ -8,13 +8,9 @@
+ #include <sstream>
+ #include <utility>
+ 
+-#include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/stringprintf.h"
+-#include "net/base/hex_utils.h"
+-#include "net/spdy/platform/api/spdy_export.h"
+ #include "net/spdy/platform/api/spdy_string.h"
+-#include "net/spdy/platform/api/spdy_string_piece.h"
+ 
+ namespace net {
+ 
+@@ -45,25 +41,6 @@ inline char SpdyHexDigitToIntImpl(char c) {
+   return base::HexDigitToInt(c);
+ }
+ 
+-inline SpdyString SpdyHexDecodeImpl(SpdyStringPiece data) {
+-  return HexDecode(data);
+-}
+-
+-NET_EXPORT_PRIVATE bool SpdyHexDecodeToUInt32Impl(SpdyStringPiece data,
+-                                                  uint32_t* out);
+-
+-inline SpdyString SpdyHexEncodeImpl(const char* bytes, size_t size) {
+-  return base::ToLowerASCII(base::HexEncode(bytes, size));
+-}
+-
+-inline SpdyString SpdyHexEncodeUInt32AndTrimImpl(uint32_t data) {
+-  return base::StringPrintf("%x", data);
+-}
+-
+-inline SpdyString SpdyHexDumpImpl(SpdyStringPiece data) {
+-  return HexDump(data);
+-}
+-
+ }  // namespace net
+ 
+ #endif  // NET_SPDY_PLATFORM_IMPL_SPDY_STRING_UTILS_IMPL_H_
+diff --git a/tools/quic/quic_dispatcher.cc b/tools/quic/quic_dispatcher.cc
+index a5214d5..c6fb0ba 100644
+--- a/tools/quic/quic_dispatcher.cc
++++ b/tools/quic/quic_dispatcher.cc
+@@ -15,11 +15,9 @@
+ #include "net/quic/platform/api/quic_flags.h"
+ #include "net/quic/platform/api/quic_logging.h"
+ #include "net/quic/platform/api/quic_ptr_util.h"
+-#include "net/quic/platform/api/quic_stack_trace.h"
+ #include "net/quic/platform/api/quic_string_piece.h"
+ #include "net/tools/quic/chlo_extractor.h"
+ #include "net/tools/quic/quic_per_connection_packet_writer.h"
+-#include "net/tools/quic/quic_simple_server_session.h"
+ #include "net/tools/quic/quic_time_wait_list_manager.h"
+ #include "net/tools/quic/stateless_rejector.h"
+ 
+@@ -240,23 +238,27 @@ class ChloValidator : public ChloAlpnExtractor {
+ 
+ QuicDispatcher::QuicDispatcher(
+     const QuicConfig& config,
++    const QuicVersionManager& version_manager,
+     const QuicCryptoServerConfig* crypto_config,
+-    QuicVersionManager* version_manager,
+-    std::unique_ptr<QuicConnectionHelperInterface> helper,
+-    std::unique_ptr<QuicCryptoServerStream::Helper> session_helper,
+-    std::unique_ptr<QuicAlarmFactory> alarm_factory)
++    QuicCryptoServerStream::Helper* session_helper,
++    QuicConnectionHelperInterface* helper,
++    QuicAlarmFactory* alarm_factory,
++    QuicPacketWriter* writer)
+     : config_(config),
++      version_manager_(version_manager),
+       crypto_config_(crypto_config),
++      session_helper_(session_helper),
++      helper_(helper),
++      alarm_factory_(alarm_factory),
++      writer_(writer),
+       compressed_certs_cache_(
+           QuicCompressedCertsCache::kQuicCompressedCertsCacheSize),
+-      helper_(std::move(helper)),
+-      session_helper_(std::move(session_helper)),
+-      alarm_factory_(std::move(alarm_factory)),
++      time_wait_list_manager_(new QuicTimeWaitListManager(
++          writer_, this, helper_, alarm_factory_)),
+       delete_sessions_alarm_(
+           alarm_factory_->CreateAlarm(new DeleteSessionsAlarm(this))),
+-      buffered_packets_(this, helper_->GetClock(), alarm_factory_.get()),
++      buffered_packets_(this, helper_->GetClock(), alarm_factory_),
+       current_packet_(nullptr),
+-      version_manager_(version_manager),
+       framer_(GetSupportedVersions(),
+               /*unused*/ QuicTime::Zero(),
+               Perspective::IS_SERVER),
+@@ -271,15 +273,9 @@ QuicDispatcher::~QuicDispatcher() {
+   closed_session_list_.clear();
+ }
+ 
+-void QuicDispatcher::InitializeWithWriter(QuicPacketWriter* writer) {
+-  DCHECK(writer_ == nullptr);
+-  writer_.reset(writer);
+-  time_wait_list_manager_.reset(CreateQuicTimeWaitListManager());
+-}
+-
+-void QuicDispatcher::ProcessPacket(const QuicSocketAddress& server_address,
+-                                   const QuicSocketAddress& client_address,
+-                                   const QuicReceivedPacket& packet) {
++void QuicDispatcher::ProcessUdpPacket(const QuicSocketAddress& server_address,
++                                      const QuicSocketAddress& client_address,
++                                      const QuicReceivedPacket& packet) {
+   current_server_address_ = server_address;
+   current_client_address_ = client_address;
+   current_packet_ = &packet;
+@@ -564,7 +560,6 @@ void QuicDispatcher::OnConnectionClosed(QuicConnectionId connection_id,
+     QUIC_BUG << "ConnectionId " << connection_id
+              << " does not exist in the session map.  Error: "
+              << QuicErrorCodeToString(error);
+-    QUIC_BUG << QuicStackTrace();
+     return;
+   }
+ 
+@@ -766,11 +761,6 @@ bool QuicDispatcher::ShouldAttemptCheapStatelessRejection() {
+   return true;
+ }
+ 
+-QuicTimeWaitListManager* QuicDispatcher::CreateQuicTimeWaitListManager() {
+-  return new QuicTimeWaitListManager(writer_.get(), this, helper_.get(),
+-                                     alarm_factory_.get());
+-}
+-
+ void QuicDispatcher::BufferEarlyPacket(QuicConnectionId connection_id) {
+   bool is_new_connection = !buffered_packets_.HasBufferedPackets(connection_id);
+   if (is_new_connection &&
+@@ -858,7 +848,7 @@ bool QuicDispatcher::HandlePacketForTimeWait(const QuicPacketHeader& header) {
+ }
+ 
+ QuicPacketWriter* QuicDispatcher::CreatePerConnectionWriter() {
+-  return new QuicPerConnectionPacketWriter(writer_.get());
++  return new QuicPerConnectionPacketWriter(writer_);
+ }
+ 
+ void QuicDispatcher::SetLastError(QuicErrorCode error) {
+@@ -922,7 +912,7 @@ void QuicDispatcher::MaybeRejectStatelessly(QuicConnectionId connection_id,
+       crypto_config_, &compressed_certs_cache_, helper()->GetClock(),
+       helper()->GetRandomGenerator(), current_packet_->length(),
+       GetClientAddress(), current_server_address_));
+-  ChloValidator validator(session_helper_.get(), current_server_address_,
++  ChloValidator validator(session_helper_, current_server_address_,
+                           rejector.get());
+   if (!ChloExtractor::Extract(*current_packet_, GetSupportedVersions(),
+                               &validator)) {
+@@ -1049,11 +1039,11 @@ void QuicDispatcher::ProcessStatelessRejectorState(
+ 
+ const QuicTransportVersionVector&
+ QuicDispatcher::GetSupportedTransportVersions() {
+-  return version_manager_->GetSupportedTransportVersions();
++  return version_manager_.GetSupportedTransportVersions();
+ }
+ 
+ const ParsedQuicVersionVector& QuicDispatcher::GetSupportedVersions() {
+-  return version_manager_->GetSupportedVersions();
++  return version_manager_.GetSupportedVersions();
+ }
+ 
+ void QuicDispatcher::DeliverPacketsToSession(
+diff --git a/tools/quic/quic_dispatcher.h b/tools/quic/quic_dispatcher.h
+index 1fbc265..0ce9632 100644
+--- a/tools/quic/quic_dispatcher.h
++++ b/tools/quic/quic_dispatcher.h
+@@ -24,20 +24,15 @@
+ #include "net/quic/platform/api/quic_containers.h"
+ #include "net/quic/platform/api/quic_socket_address.h"
+ 
+-#include "net/tools/quic/quic_process_packet_interface.h"
+ #include "net/tools/quic/quic_time_wait_list_manager.h"
+ #include "net/tools/quic/stateless_rejector.h"
+ 
+ namespace net {
+-namespace test {
+-class QuicDispatcherPeer;
+-}  // namespace test
+ 
+ class QuicConfig;
+ class QuicCryptoServerConfig;
+ 
+ class QuicDispatcher : public QuicTimeWaitListManager::Visitor,
+-                       public ProcessPacketInterface,
+                        public QuicFramerVisitorInterface,
+                        public QuicBufferedPacketStore::VisitorInterface {
+  public:
+@@ -45,22 +40,20 @@ class QuicDispatcher : public QuicTimeWaitListManager::Visitor,
+   typedef QuicLinkedHashMap<QuicBlockedWriterInterface*, bool> WriteBlockedList;
+ 
+   QuicDispatcher(const QuicConfig& config,
++                 const QuicVersionManager& version_manager,
+                  const QuicCryptoServerConfig* crypto_config,
+-                 QuicVersionManager* version_manager,
+-                 std::unique_ptr<QuicConnectionHelperInterface> helper,
+-                 std::unique_ptr<QuicCryptoServerStream::Helper> session_helper,
+-                 std::unique_ptr<QuicAlarmFactory> alarm_factory);
++                 QuicCryptoServerStream::Helper* session_helper,
++                 QuicConnectionHelperInterface* helper,
++                 QuicAlarmFactory* alarm_factory,
++                 QuicPacketWriter* writer);
+ 
+   ~QuicDispatcher() override;
+ 
+-  // Takes ownership of |writer|.
+-  void InitializeWithWriter(QuicPacketWriter* writer);
+-
+   // Process the incoming packet by creating a new session, passing it to
+   // an existing session, or passing it to the time wait list.
+-  void ProcessPacket(const QuicSocketAddress& server_address,
+-                     const QuicSocketAddress& client_address,
+-                     const QuicReceivedPacket& packet) override;
++  virtual void ProcessUdpPacket(const QuicSocketAddress& server_address,
++                                const QuicSocketAddress& client_address,
++                                const QuicReceivedPacket& packet);
+ 
+   // Called when the socket becomes writable to allow queued writes to happen.
+   virtual void OnCanWrite();
+@@ -192,10 +185,6 @@ class QuicDispatcher : public QuicTimeWaitListManager::Visitor,
+   // QuicPacketFate to tell what should be done with the packet.
+   virtual QuicPacketFate ValidityChecks(const QuicPacketHeader& header);
+ 
+-  // Create and return the time wait list manager for this dispatcher, which
+-  // will be owned by the dispatcher as time_wait_list_manager_
+-  virtual QuicTimeWaitListManager* CreateQuicTimeWaitListManager();
+-
+   // Called when |connection_id| doesn't have an open connection yet, to buffer
+   // |current_packet_| until it can be delivered to the connection.
+   void BufferEarlyPacket(QuicConnectionId connection_id);
+@@ -239,15 +228,15 @@ class QuicDispatcher : public QuicTimeWaitListManager::Visitor,
+ 
+   QuicFramer* framer() { return &framer_; }
+ 
+-  QuicConnectionHelperInterface* helper() { return helper_.get(); }
++  QuicConnectionHelperInterface* helper() { return helper_; }
+ 
+   QuicCryptoServerStream::Helper* session_helper() {
+-    return session_helper_.get();
++    return session_helper_;
+   }
+ 
+-  QuicAlarmFactory* alarm_factory() { return alarm_factory_.get(); }
++  QuicAlarmFactory* alarm_factory() { return alarm_factory_; }
+ 
+-  QuicPacketWriter* writer() { return writer_.get(); }
++  QuicPacketWriter* writer() { return writer_; }
+ 
+   // Creates per-connection packet writers out of the QuicDispatcher's shared
+   // QuicPacketWriter. The per-connection writers' IsWriteBlocked() state must
+@@ -296,7 +285,6 @@ class QuicDispatcher : public QuicTimeWaitListManager::Visitor,
+   virtual bool ShouldAddToBlockedList();
+ 
+  private:
+-  friend class test::QuicDispatcherPeer;
+   friend class StatelessRejectorProcessDoneCallback;
+ 
+   typedef QuicUnorderedSet<QuicConnectionId> QuicConnectionIdSet;
+@@ -340,9 +328,16 @@ class QuicDispatcher : public QuicTimeWaitListManager::Visitor,
+     new_sessions_allowed_per_event_loop_ = new_sessions_allowed_per_event_loop;
+   }
+ 
+-  const QuicConfig& config_;
+-
++private:
++  // params
++  QuicConfig config_;
++  QuicVersionManager version_manager_;
+   const QuicCryptoServerConfig* crypto_config_;
++  // not owned.
++  QuicCryptoServerStream::Helper* session_helper_;
++  QuicConnectionHelperInterface* helper_;
++  QuicAlarmFactory* alarm_factory_;
++  QuicPacketWriter* writer_;
+ 
+   // The cache for most recently compressed certs.
+   QuicCompressedCertsCache compressed_certs_cache_;
+@@ -358,21 +353,9 @@ class QuicDispatcher : public QuicTimeWaitListManager::Visitor,
+   // The list of closed but not-yet-deleted sessions.
+   std::vector<std::unique_ptr<QuicSession>> closed_session_list_;
+ 
+-  // The helper used for all connections.
+-  std::unique_ptr<QuicConnectionHelperInterface> helper_;
+-
+-  // The helper used for all sessions.
+-  std::unique_ptr<QuicCryptoServerStream::Helper> session_helper_;
+-
+-  // Creates alarms.
+-  std::unique_ptr<QuicAlarmFactory> alarm_factory_;
+-
+   // An alarm which deletes closed sessions.
+   std::unique_ptr<QuicAlarm> delete_sessions_alarm_;
+ 
+-  // The writer to write to the socket with.
+-  std::unique_ptr<QuicPacketWriter> writer_;
+-
+   // Packets which are buffered until a connection can be created to handle
+   // them.
+   QuicBufferedPacketStore buffered_packets_;
+@@ -390,9 +373,6 @@ class QuicDispatcher : public QuicTimeWaitListManager::Visitor,
+   std::string current_alpn_;
+   QuicConnectionId current_connection_id_;
+ 
+-  // Used to get the supported versions based on flag. Does not own.
+-  QuicVersionManager* version_manager_;
+-
+   QuicFramer framer_;
+ 
+   // The last error set by SetLastError(), which is called by

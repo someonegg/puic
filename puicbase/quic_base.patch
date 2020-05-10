@@ -1,0 +1,1391 @@
+diff --git a/callback_internal.h b/callback_internal.h
+index ab2182e..7290888 100644
+--- a/callback_internal.h
++++ b/callback_internal.h
+@@ -59,7 +59,7 @@ using PassingTraitsType = typename PassingTraits<T>::Type;
+ // of bloat. Its only task is to call the destructor which can be done with a
+ // function pointer.
+ class BASE_EXPORT BindStateBase
+-    : public RefCountedThreadSafe<BindStateBase, BindStateBaseRefCountTraits> {
++    : public RefCounted<BindStateBase, BindStateBaseRefCountTraits> {
+  public:
+   REQUIRE_ADOPTION_FOR_REFCOUNTED_TYPE();
+ 
+@@ -75,7 +75,7 @@ class BASE_EXPORT BindStateBase
+   ~BindStateBase() = default;
+ 
+   friend struct BindStateBaseRefCountTraits;
+-  friend class RefCountedThreadSafe<BindStateBase, BindStateBaseRefCountTraits>;
++  friend class RefCounted<BindStateBase, BindStateBaseRefCountTraits>;
+ 
+   friend class CallbackBase;
+   friend class CallbackBaseCopyable;
+diff --git a/location.h b/location.h
+index bf08682..0f9dcaa 100644
+--- a/location.h
++++ b/location.h
+@@ -11,7 +11,6 @@
+ #include <string>
+ 
+ #include "base/base_export.h"
+-#include "base/debug/debugging_flags.h"
+ #include "base/hash.h"
+ 
+ namespace base {
+@@ -83,22 +82,10 @@ class BASE_EXPORT Location {
+ BASE_EXPORT const void* GetProgramCounter();
+ 
+ // The macros defined here will expand to the current function.
+-#if BUILDFLAG(ENABLE_LOCATION_SOURCE)
+-
+-// Full source information should be included.
+ #define FROM_HERE FROM_HERE_WITH_EXPLICIT_FUNCTION(__func__)
+ #define FROM_HERE_WITH_EXPLICIT_FUNCTION(function_name) \
+   ::base::Location::CreateFromHere(function_name, __FILE__, __LINE__)
+ 
+-#else
+-
+-// TODO(http://crbug.com/760702) remove the __FILE__ argument from these calls.
+-#define FROM_HERE ::base::Location::CreateFromHere(__FILE__)
+-#define FROM_HERE_WITH_EXPLICIT_FUNCTION(function_name) \
+-  ::base::Location::CreateFromHere(function_name, __FILE__, -1)
+-
+-#endif
+-
+ }  // namespace base
+ 
+ namespace std {
+diff --git a/logging.cc b/logging.cc
+index 9988f38..086ba87 100644
+--- a/logging.cc
++++ b/logging.cc
+@@ -2,115 +2,58 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++// <PUIC-PATCH>
++
+ #include "base/logging.h"
+ 
+-#include <limits.h>
+-#include <stdint.h>
++#include <cstdint>
++#include <climits>
++#include <cstring>
++#include <ctime>
++#include <algorithm>
++#include <iomanip>
++#include <ostream>
++#include <string>
++#include <utility>
+ 
+-#include "base/macros.h"
+-#include "build/build_config.h"
++#if defined(OS_POSIX)
++#include <sys/time.h>
++#include <errno.h>
++#include <unistd.h>
++#endif
++
++#if defined(OS_MACOSX)
++#include <mach/mach_time.h>
++#endif
+ 
+ #if defined(OS_WIN)
+ #include <io.h>
+ #include <windows.h>
+-typedef HANDLE FileHandle;
+-typedef HANDLE MutexHandle;
+ // Windows warns on using write().  It prefers _write().
+ #define write(fd, buf, count) _write(fd, buf, static_cast<unsigned int>(count))
+ // Windows doesn't define STDERR_FILENO.  Define it here.
+ #define STDERR_FILENO 2
+-
+-#elif defined(OS_MACOSX)
+-// In MacOS 10.12 and iOS 10.0 and later ASL (Apple System Log) was deprecated
+-// in favor of OS_LOG (Unified Logging).
+-#include <AvailabilityMacros.h>
+-#if defined(OS_IOS)
+-#if !defined(__IPHONE_10_0) || __IPHONE_OS_VERSION_MIN_REQUIRED < __IPHONE_10_0
+-#define USE_ASL
+-#endif
+-#else  // !defined(OS_IOS)
+-#if !defined(MAC_OS_X_VERSION_10_12) || \
+-    MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_X_VERSION_10_12
+-#define USE_ASL
+ #endif
+-#endif  // defined(OS_IOS)
+ 
+-#if defined(USE_ASL)
+-#include <asl.h>
+-#else
+-#include <os/log.h>
+-#endif
+-
+-#include <CoreFoundation/CoreFoundation.h>
+-#include <mach/mach.h>
+-#include <mach/mach_time.h>
+-#include <mach-o/dyld.h>
+-
+-#elif defined(OS_POSIX)
+-#if defined(OS_NACL)
+-#include <sys/time.h>  // timespec doesn't seem to be in <time.h>
+-#endif
+-#include <time.h>
+-#endif
+-
+-#if defined(OS_POSIX)
+-#include <errno.h>
+-#include <paths.h>
+-#include <pthread.h>
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <string.h>
+-#include <sys/stat.h>
+-#include <unistd.h>
+-#define MAX_PATH PATH_MAX
+-typedef FILE* FileHandle;
+-typedef pthread_mutex_t* MutexHandle;
+-#endif
+-
+-#include <algorithm>
+-#include <cstring>
+-#include <ctime>
+-#include <iomanip>
+-#include <ostream>
+-#include <string>
+-#include <utility>
+-
+-#include "base/base_switches.h"
++#include "base/macros.h"
++#include "build/build_config.h"
+ #include "base/callback.h"
+-#include "base/command_line.h"
+-#include "base/containers/stack.h"
+-#include "base/debug/activity_tracker.h"
+-#include "base/debug/alias.h"
+-#include "base/debug/debugger.h"
+-#include "base/debug/stack_trace.h"
+-#include "base/lazy_instance.h"
+ #include "base/posix/eintr_wrapper.h"
+ #include "base/strings/string_piece.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/stringprintf.h"
+-#include "base/strings/sys_string_conversions.h"
+ #include "base/strings/utf_string_conversions.h"
+-#include "base/synchronization/lock_impl.h"
+-#include "base/threading/platform_thread.h"
+ #include "base/vlog.h"
+ #if defined(OS_POSIX)
+ #include "base/posix/safe_strerror.h"
+ #endif
+ 
+-#if defined(OS_ANDROID)
+-#include <android/log.h>
+-#endif
+-
+ namespace logging {
+ 
+ namespace {
+ 
+-VlogInfo* g_vlog_info = nullptr;
+-VlogInfo* g_vlog_info_prev = nullptr;
+-
+-const char* const log_severity_names[] = {"INFO", "WARNING", "ERROR", "FATAL"};
+-static_assert(LOG_NUM_SEVERITIES == arraysize(log_severity_names),
+-              "Incorrect number of log_severity_names");
++const char* const log_severity_names[LOG_NUM_SEVERITIES] = {
++  "INFO", "WARNING", "ERROR", "FATAL" };
+ 
+ const char* log_severity_name(int severity) {
+   if (severity >= 0 && severity < LOG_NUM_SEVERITIES)
+@@ -125,34 +68,12 @@ LoggingDestination g_logging_destination = LOG_DEFAULT;
+ // For LOG_ERROR and above, always print to stderr.
+ const int kAlwaysPrintErrorLevel = LOG_ERROR;
+ 
+-// Which log file to use? This is initialized by InitLogging or
+-// will be lazily initialized to the default value when it is
+-// first needed.
+-#if defined(OS_WIN)
+-typedef std::wstring PathString;
+-#else
+-typedef std::string PathString;
+-#endif
+-PathString* g_log_file_name = nullptr;
+-
+-// This file is lazily opened and the handle may be nullptr
+-FileHandle g_log_file = nullptr;
+-
+ // What should be prepended to each message?
+ bool g_log_process_id = false;
+ bool g_log_thread_id = false;
+ bool g_log_timestamp = true;
+ bool g_log_tickcount = false;
+ 
+-// Should we pop up fatal debug messages in a dialog?
+-bool show_error_dialogs = false;
+-
+-// An assert handler override specified by the client to be called instead of
+-// the debug message dialog and process termination. Assert handlers are stored
+-// in stack to allow overriding and restoring.
+-base::LazyInstance<base::stack<LogAssertHandlerFunction>>::Leaky
+-    log_assert_handler_stack = LAZY_INSTANCE_INITIALIZER;
+-
+ // A log message handler that gets notified of every log message we process.
+ LogMessageHandlerFunction log_message_handler = nullptr;
+ 
+@@ -186,256 +107,13 @@ uint64_t TickCount() {
+ #endif
+ }
+ 
+-void DeleteFilePath(const PathString& log_name) {
+-#if defined(OS_WIN)
+-  DeleteFile(log_name.c_str());
+-#elif defined(OS_NACL)
+-  // Do nothing; unlink() isn't supported on NaCl.
+-#else
+-  unlink(log_name.c_str());
+-#endif
+-}
+-
+-PathString GetDefaultLogFile() {
+-#if defined(OS_WIN)
+-  // On Windows we use the same path as the exe.
+-  wchar_t module_name[MAX_PATH];
+-  GetModuleFileName(nullptr, module_name, MAX_PATH);
+-
+-  PathString log_name = module_name;
+-  PathString::size_type last_backslash = log_name.rfind('\\', log_name.size());
+-  if (last_backslash != PathString::npos)
+-    log_name.erase(last_backslash + 1);
+-  log_name += L"debug.log";
+-  return log_name;
+-#elif defined(OS_POSIX)
+-  // On other platforms we just use the current directory.
+-  return PathString("debug.log");
+-#endif
+-}
+-
+-// We don't need locks on Windows for atomically appending to files. The OS
+-// provides this functionality.
+-#if !defined(OS_WIN)
+-// This class acts as a wrapper for locking the logging files.
+-// LoggingLock::Init() should be called from the main thread before any logging
+-// is done. Then whenever logging, be sure to have a local LoggingLock
+-// instance on the stack. This will ensure that the lock is unlocked upon
+-// exiting the frame.
+-// LoggingLocks can not be nested.
+-class LoggingLock {
+- public:
+-  LoggingLock() {
+-    LockLogging();
+-  }
+-
+-  ~LoggingLock() {
+-    UnlockLogging();
+-  }
+-
+-  static void Init(LogLockingState lock_log, const PathChar* new_log_file) {
+-    if (initialized)
+-      return;
+-    lock_log_file = lock_log;
+-
+-    if (lock_log_file != LOCK_LOG_FILE)
+-      log_lock = new base::internal::LockImpl();
+-
+-    initialized = true;
+-  }
+-
+- private:
+-  static void LockLogging() {
+-    if (lock_log_file == LOCK_LOG_FILE) {
+-#if defined(OS_POSIX)
+-      pthread_mutex_lock(&log_mutex);
+-#endif
+-    } else {
+-      // use the lock
+-      log_lock->Lock();
+-    }
+-  }
+-
+-  static void UnlockLogging() {
+-    if (lock_log_file == LOCK_LOG_FILE) {
+-#if defined(OS_POSIX)
+-      pthread_mutex_unlock(&log_mutex);
+-#endif
+-    } else {
+-      log_lock->Unlock();
+-    }
+-  }
+-
+-  // The lock is used if log file locking is false. It helps us avoid problems
+-  // with multiple threads writing to the log file at the same time.  Use
+-  // LockImpl directly instead of using Lock, because Lock makes logging calls.
+-  static base::internal::LockImpl* log_lock;
+-
+-  // When we don't use a lock, we are using a global mutex. We need to do this
+-  // because LockFileEx is not thread safe.
+-#if defined(OS_POSIX)
+-  static pthread_mutex_t log_mutex;
+-#endif
+-
+-  static bool initialized;
+-  static LogLockingState lock_log_file;
+-};
+-
+-// static
+-bool LoggingLock::initialized = false;
+-// static
+-base::internal::LockImpl* LoggingLock::log_lock = nullptr;
+-// static
+-LogLockingState LoggingLock::lock_log_file = LOCK_LOG_FILE;
+-
+-#if defined(OS_POSIX)
+-pthread_mutex_t LoggingLock::log_mutex = PTHREAD_MUTEX_INITIALIZER;
+-#endif
+-
+-#endif  // OS_WIN
+-
+-// Called by logging functions to ensure that |g_log_file| is initialized
+-// and can be used for writing. Returns false if the file could not be
+-// initialized. |g_log_file| will be nullptr in this case.
+-bool InitializeLogFileHandle() {
+-  if (g_log_file)
+-    return true;
+-
+-  if (!g_log_file_name) {
+-    // Nobody has called InitLogging to specify a debug log file, so here we
+-    // initialize the log file name to a default.
+-    g_log_file_name = new PathString(GetDefaultLogFile());
+-  }
+-
+-  if ((g_logging_destination & LOG_TO_FILE) != 0) {
+-#if defined(OS_WIN)
+-    // The FILE_APPEND_DATA access mask ensures that the file is atomically
+-    // appended to across accesses from multiple threads.
+-    // https://msdn.microsoft.com/en-us/library/windows/desktop/aa364399(v=vs.85).aspx
+-    // https://msdn.microsoft.com/en-us/library/windows/desktop/aa363858(v=vs.85).aspx
+-    g_log_file = CreateFile(g_log_file_name->c_str(), FILE_APPEND_DATA,
+-                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+-                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+-    if (g_log_file == INVALID_HANDLE_VALUE || g_log_file == nullptr) {
+-      // We are intentionally not using FilePath or FileUtil here to reduce the
+-      // dependencies of the logging implementation. For e.g. FilePath and
+-      // FileUtil depend on shell32 and user32.dll. This is not acceptable for
+-      // some consumers of base logging like chrome_elf, etc.
+-      // Please don't change the code below to use FilePath.
+-      // try the current directory
+-      wchar_t system_buffer[MAX_PATH];
+-      system_buffer[0] = 0;
+-      DWORD len = ::GetCurrentDirectory(arraysize(system_buffer),
+-                                        system_buffer);
+-      if (len == 0 || len > arraysize(system_buffer))
+-        return false;
+-
+-      *g_log_file_name = system_buffer;
+-      // Append a trailing backslash if needed.
+-      if (g_log_file_name->back() != L'\\')
+-        *g_log_file_name += L"\\";
+-      *g_log_file_name += L"debug.log";
+-
+-      g_log_file = CreateFile(g_log_file_name->c_str(), FILE_APPEND_DATA,
+-                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+-                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+-      if (g_log_file == INVALID_HANDLE_VALUE || g_log_file == nullptr) {
+-        g_log_file = nullptr;
+-        return false;
+-      }
+-    }
+-#elif defined(OS_POSIX)
+-    g_log_file = fopen(g_log_file_name->c_str(), "a");
+-    if (g_log_file == nullptr)
+-      return false;
+-#endif
+-  }
+-
+-  return true;
+-}
+-
+-void CloseFile(FileHandle log) {
+-#if defined(OS_WIN)
+-  CloseHandle(log);
+-#else
+-  fclose(log);
+-#endif
+-}
+-
+-void CloseLogFileUnlocked() {
+-  if (!g_log_file)
+-    return;
+-
+-  CloseFile(g_log_file);
+-  g_log_file = nullptr;
+-}
+-
+ }  // namespace
+ 
+-#if DCHECK_IS_ON() && defined(SYZYASAN)
+-// In DCHECK-enabled SyzyASAN builds, allow the meaning of LOG_DCHECK to be
+-// determined at run-time. We default it to INFO, to avoid it triggering
+-// crashes before the run-time has explicitly chosen the behaviour.
+-BASE_EXPORT logging::LogSeverity LOG_DCHECK = LOG_INFO;
+-#endif
+-
+ // This is never instantiated, it's just used for EAT_STREAM_PARAMETERS to have
+ // an object of the correct type on the LHS of the unused part of the ternary
+ // operator.
+ std::ostream* g_swallow_stream;
+ 
+-LoggingSettings::LoggingSettings()
+-    : logging_dest(LOG_DEFAULT),
+-      log_file(nullptr),
+-      lock_log(LOCK_LOG_FILE),
+-      delete_old(APPEND_TO_OLD_LOG_FILE) {}
+-
+-bool BaseInitLoggingImpl(const LoggingSettings& settings) {
+-#if defined(OS_NACL)
+-  // Can log only to the system debug log.
+-  CHECK_EQ(settings.logging_dest & ~LOG_TO_SYSTEM_DEBUG_LOG, 0);
+-#endif
+-  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+-  // Don't bother initializing |g_vlog_info| unless we use one of the
+-  // vlog switches.
+-  if (command_line->HasSwitch(switches::kV) ||
+-      command_line->HasSwitch(switches::kVModule)) {
+-    // NOTE: If |g_vlog_info| has already been initialized, it might be in use
+-    // by another thread. Don't delete the old VLogInfo, just create a second
+-    // one. We keep track of both to avoid memory leak warnings.
+-    CHECK(!g_vlog_info_prev);
+-    g_vlog_info_prev = g_vlog_info;
+-
+-    g_vlog_info =
+-        new VlogInfo(command_line->GetSwitchValueASCII(switches::kV),
+-                     command_line->GetSwitchValueASCII(switches::kVModule),
+-                     &g_min_log_level);
+-  }
+-
+-  g_logging_destination = settings.logging_dest;
+-
+-  // ignore file options unless logging to file is set.
+-  if ((g_logging_destination & LOG_TO_FILE) == 0)
+-    return true;
+-
+-#if !defined(OS_WIN)
+-  LoggingLock::Init(settings.lock_log, settings.log_file);
+-  LoggingLock logging_lock;
+-#endif
+-
+-  // Calling InitLogging twice or after some log call has already opened the
+-  // default log file will re-initialize to the new options.
+-  CloseLogFileUnlocked();
+-
+-  if (!g_log_file_name)
+-    g_log_file_name = new PathString();
+-  *g_log_file_name = settings.log_file;
+-  if (settings.delete_old == DELETE_OLD_LOG_FILE)
+-    DeleteFilePath(*g_log_file_name);
+-
+-  return InitializeLogFileHandle();
+-}
+-
+ void SetMinLogLevel(int level) {
+   g_min_log_level = std::min(LOG_FATAL, level);
+ }
+@@ -461,12 +139,7 @@ int GetVlogVerbosity() {
+ 
+ int GetVlogLevelHelper(const char* file, size_t N) {
+   DCHECK_GT(N, 0U);
+-  // Note: |g_vlog_info| may change on a different thread during startup
+-  // (but will always be valid or nullptr).
+-  VlogInfo* vlog_info = g_vlog_info;
+-  return vlog_info ?
+-      vlog_info->GetVlogLevel(base::StringPiece(file, N - 1)) :
+-      GetVlogVerbosity();
++  return GetVlogVerbosity();
+ }
+ 
+ void SetLogItems(bool enable_process_id, bool enable_thread_id,
+@@ -477,19 +150,6 @@ void SetLogItems(bool enable_process_id, bool enable_thread_id,
+   g_log_tickcount = enable_tickcount;
+ }
+ 
+-void SetShowErrorDialogs(bool enable_dialogs) {
+-  show_error_dialogs = enable_dialogs;
+-}
+-
+-ScopedLogAssertHandler::ScopedLogAssertHandler(
+-    LogAssertHandlerFunction handler) {
+-  log_assert_handler_stack.Get().push(std::move(handler));
+-}
+-
+-ScopedLogAssertHandler::~ScopedLogAssertHandler() {
+-  log_assert_handler_stack.Get().pop();
+-}
+-
+ void SetLogMessageHandler(LogMessageHandlerFunction handler) {
+   log_message_handler = handler;
+ }
+@@ -514,29 +174,6 @@ void MakeCheckOpValueString(std::ostream* os, std::nullptr_t p) {
+   (*os) << "nullptr";
+ }
+ 
+-#if !defined(NDEBUG)
+-// Displays a message box to the user with the error message in it.
+-// Used for fatal messages, where we close the app simultaneously.
+-// This is for developers only; we don't use this in circumstances
+-// (like release builds) where users could see it, since users don't
+-// understand these messages anyway.
+-void DisplayDebugMessageInDialog(const std::string& str) {
+-  if (str.empty())
+-    return;
+-
+-  if (!show_error_dialogs)
+-    return;
+-
+-#if defined(OS_WIN)
+-  MessageBoxW(nullptr, base::UTF8ToUTF16(str).c_str(), L"Fatal error",
+-              MB_OK | MB_ICONHAND | MB_TOPMOST);
+-#else
+-  // We intentionally don't implement a dialog on other platforms.
+-  // You can just look at stderr.
+-#endif  // defined(OS_WIN)
+-}
+-#endif  // !defined(NDEBUG)
+-
+ #if defined(OS_WIN)
+ LogMessage::SaveLastError::SaveLastError() : last_error_(::GetLastError()) {
+ }
+@@ -573,16 +210,6 @@ LogMessage::LogMessage(const char* file, int line, LogSeverity severity,
+ }
+ 
+ LogMessage::~LogMessage() {
+-  size_t stack_start = stream_.tellp();
+-#if !defined(OFFICIAL_BUILD) && !defined(OS_NACL) && !defined(__UCLIBC__) && \
+-    !defined(OS_AIX)
+-  if (severity_ == LOG_FATAL && !base::debug::BeingDebugged()) {
+-    // Include a stack trace on a fatal, unless a debugger is attached.
+-    base::debug::StackTrace trace;
+-    stream_ << std::endl;  // Newline to separate from log message.
+-    trace.OutputToStream(&stream_);
+-  }
+-#endif
+   stream_ << std::endl;
+   std::string str_newline(stream_.str());
+ 
+@@ -594,175 +221,7 @@ LogMessage::~LogMessage() {
+     return;
+   }
+ 
+-  if ((g_logging_destination & LOG_TO_SYSTEM_DEBUG_LOG) != 0) {
+-#if defined(OS_WIN)
+-    OutputDebugStringA(str_newline.c_str());
+-#elif defined(OS_MACOSX)
+-    // In LOG_TO_SYSTEM_DEBUG_LOG mode, log messages are always written to
+-    // stderr. If stderr is /dev/null, also log via ASL (Apple System Log) or
+-    // its successor OS_LOG. If there's something weird about stderr, assume
+-    // that log messages are going nowhere and log via ASL/OS_LOG too.
+-    // Messages logged via ASL/OS_LOG show up in Console.app.
+-    //
+-    // Programs started by launchd, as UI applications normally are, have had
+-    // stderr connected to /dev/null since OS X 10.8. Prior to that, stderr was
+-    // a pipe to launchd, which logged what it received (see log_redirect_fd in
+-    // 10.7.5 launchd-392.39/launchd/src/launchd_core_logic.c).
+-    //
+-    // Another alternative would be to determine whether stderr is a pipe to
+-    // launchd and avoid logging via ASL only in that case. See 10.7.5
+-    // CF-635.21/CFUtilities.c also_do_stderr(). This would result in logging to
+-    // both stderr and ASL/OS_LOG even in tests, where it's undesirable to log
+-    // to the system log at all.
+-    //
+-    // Note that the ASL client by default discards messages whose levels are
+-    // below ASL_LEVEL_NOTICE. It's possible to change that with
+-    // asl_set_filter(), but this is pointless because syslogd normally applies
+-    // the same filter.
+-    const bool log_to_system = []() {
+-      struct stat stderr_stat;
+-      if (fstat(fileno(stderr), &stderr_stat) == -1) {
+-        return true;
+-      }
+-      if (!S_ISCHR(stderr_stat.st_mode)) {
+-        return false;
+-      }
+-
+-      struct stat dev_null_stat;
+-      if (stat(_PATH_DEVNULL, &dev_null_stat) == -1) {
+-        return true;
+-      }
+-
+-      return !S_ISCHR(dev_null_stat.st_mode) ||
+-             stderr_stat.st_rdev == dev_null_stat.st_rdev;
+-    }();
+-
+-    if (log_to_system) {
+-      // Log roughly the same way that CFLog() and NSLog() would. See 10.10.5
+-      // CF-1153.18/CFUtilities.c __CFLogCString().
+-      CFBundleRef main_bundle = CFBundleGetMainBundle();
+-      CFStringRef main_bundle_id_cf =
+-          main_bundle ? CFBundleGetIdentifier(main_bundle) : nullptr;
+-      std::string main_bundle_id =
+-          main_bundle_id_cf ? base::SysCFStringRefToUTF8(main_bundle_id_cf)
+-                            : std::string("");
+-#if defined(USE_ASL)
+-      // The facility is set to the main bundle ID if available. Otherwise,
+-      // "com.apple.console" is used.
+-      const class ASLClient {
+-       public:
+-        explicit ASLClient(const std::string& facility)
+-            : client_(asl_open(nullptr, facility.c_str(), ASL_OPT_NO_DELAY)) {}
+-        ~ASLClient() { asl_close(client_); }
+-
+-        aslclient get() const { return client_; }
+-
+-       private:
+-        aslclient client_;
+-        DISALLOW_COPY_AND_ASSIGN(ASLClient);
+-      } asl_client(main_bundle_id.empty() ? main_bundle_id
+-                                          : "com.apple.console");
+-
+-      const class ASLMessage {
+-       public:
+-        ASLMessage() : message_(asl_new(ASL_TYPE_MSG)) {}
+-        ~ASLMessage() { asl_free(message_); }
+-
+-        aslmsg get() const { return message_; }
+-
+-       private:
+-        aslmsg message_;
+-        DISALLOW_COPY_AND_ASSIGN(ASLMessage);
+-      } asl_message;
+-
+-      // By default, messages are only readable by the admin group. Explicitly
+-      // make them readable by the user generating the messages.
+-      char euid_string[12];
+-      snprintf(euid_string, arraysize(euid_string), "%d", geteuid());
+-      asl_set(asl_message.get(), ASL_KEY_READ_UID, euid_string);
+-
+-      // Map Chrome log severities to ASL log levels.
+-      const char* const asl_level_string = [](LogSeverity severity) {
+-        // ASL_LEVEL_* are ints, but ASL needs equivalent strings. This
+-        // non-obvious two-step macro trick achieves what's needed.
+-        // https://gcc.gnu.org/onlinedocs/cpp/Stringification.html
+-#define ASL_LEVEL_STR(level) ASL_LEVEL_STR_X(level)
+-#define ASL_LEVEL_STR_X(level) #level
+-        switch (severity) {
+-          case LOG_INFO:
+-            return ASL_LEVEL_STR(ASL_LEVEL_INFO);
+-          case LOG_WARNING:
+-            return ASL_LEVEL_STR(ASL_LEVEL_WARNING);
+-          case LOG_ERROR:
+-            return ASL_LEVEL_STR(ASL_LEVEL_ERR);
+-          case LOG_FATAL:
+-            return ASL_LEVEL_STR(ASL_LEVEL_CRIT);
+-          default:
+-            return severity < 0 ? ASL_LEVEL_STR(ASL_LEVEL_DEBUG)
+-                                : ASL_LEVEL_STR(ASL_LEVEL_NOTICE);
+-        }
+-#undef ASL_LEVEL_STR
+-#undef ASL_LEVEL_STR_X
+-      }(severity_);
+-      asl_set(asl_message.get(), ASL_KEY_LEVEL, asl_level_string);
+-
+-      asl_set(asl_message.get(), ASL_KEY_MSG, str_newline.c_str());
+-
+-      asl_send(asl_client.get(), asl_message.get());
+-#else   // !defined(USE_ASL)
+-      const class OSLog {
+-       public:
+-        explicit OSLog(const char* subsystem)
+-            : os_log_(subsystem ? os_log_create(subsystem, "chromium_logging")
+-                                : OS_LOG_DEFAULT) {}
+-        ~OSLog() {
+-          if (os_log_ != OS_LOG_DEFAULT) {
+-            os_release(os_log_);
+-          }
+-        }
+-        os_log_t get() const { return os_log_; }
+-
+-       private:
+-        os_log_t os_log_;
+-        DISALLOW_COPY_AND_ASSIGN(OSLog);
+-      } log(main_bundle_id.empty() ? nullptr : main_bundle_id.c_str());
+-      const os_log_type_t os_log_type = [](LogSeverity severity) {
+-        switch (severity) {
+-          case LOG_INFO:
+-            return OS_LOG_TYPE_INFO;
+-          case LOG_WARNING:
+-            return OS_LOG_TYPE_DEFAULT;
+-          case LOG_ERROR:
+-            return OS_LOG_TYPE_ERROR;
+-          case LOG_FATAL:
+-            return OS_LOG_TYPE_FAULT;
+-          default:
+-            return severity < 0 ? OS_LOG_TYPE_DEBUG : OS_LOG_TYPE_DEFAULT;
+-        }
+-      }(severity_);
+-      os_log_with_type(log.get(), os_log_type, "%{public}s",
+-                       str_newline.c_str());
+-#endif  // defined(USE_ASL)
+-    }
+-#elif defined(OS_ANDROID)
+-    android_LogPriority priority =
+-        (severity_ < 0) ? ANDROID_LOG_VERBOSE : ANDROID_LOG_UNKNOWN;
+-    switch (severity_) {
+-      case LOG_INFO:
+-        priority = ANDROID_LOG_INFO;
+-        break;
+-      case LOG_WARNING:
+-        priority = ANDROID_LOG_WARN;
+-        break;
+-      case LOG_ERROR:
+-        priority = ANDROID_LOG_ERROR;
+-        break;
+-      case LOG_FATAL:
+-        priority = ANDROID_LOG_FATAL;
+-        break;
+-    }
+-    __android_log_write(priority, "chromium", str_newline.c_str());
+-#endif
++  if ((g_logging_destination & LOG_TO_STDERR) != 0) {
+     ignore_result(fwrite(str_newline.data(), str_newline.size(), 1, stderr));
+     fflush(stderr);
+   } else if (severity_ >= kAlwaysPrintErrorLevel) {
+@@ -773,77 +232,8 @@ LogMessage::~LogMessage() {
+     fflush(stderr);
+   }
+ 
+-  // write to log file
+-  if ((g_logging_destination & LOG_TO_FILE) != 0) {
+-    // We can have multiple threads and/or processes, so try to prevent them
+-    // from clobbering each other's writes.
+-    // If the client app did not call InitLogging, and the lock has not
+-    // been created do it now. We do this on demand, but if two threads try
+-    // to do this at the same time, there will be a race condition to create
+-    // the lock. This is why InitLogging should be called from the main
+-    // thread at the beginning of execution.
+-#if !defined(OS_WIN)
+-    LoggingLock::Init(LOCK_LOG_FILE, nullptr);
+-    LoggingLock logging_lock;
+-#endif
+-    if (InitializeLogFileHandle()) {
+-#if defined(OS_WIN)
+-      DWORD num_written;
+-      WriteFile(g_log_file,
+-                static_cast<const void*>(str_newline.c_str()),
+-                static_cast<DWORD>(str_newline.length()),
+-                &num_written,
+-                nullptr);
+-#else
+-      ignore_result(fwrite(
+-          str_newline.data(), str_newline.size(), 1, g_log_file));
+-      fflush(g_log_file);
+-#endif
+-    }
+-  }
+-
+-  if (severity_ == LOG_FATAL) {
+-    // Write the log message to the global activity tracker, if running.
+-    base::debug::GlobalActivityTracker* tracker =
+-        base::debug::GlobalActivityTracker::Get();
+-    if (tracker)
+-      tracker->RecordLogMessage(str_newline);
+-
+-    // Ensure the first characters of the string are on the stack so they
+-    // are contained in minidumps for diagnostic purposes.
+-    char str_stack[1024];
+-    str_newline.copy(str_stack, arraysize(str_stack));
+-    base::debug::Alias(str_stack);
+-
+-    if (log_assert_handler_stack.IsCreated() &&
+-        !log_assert_handler_stack.Get().empty()) {
+-      LogAssertHandlerFunction log_assert_handler =
+-          log_assert_handler_stack.Get().top();
+-
+-      if (log_assert_handler) {
+-        log_assert_handler.Run(
+-            file_, line_,
+-            base::StringPiece(str_newline.c_str() + message_start_,
+-                              stack_start - message_start_),
+-            base::StringPiece(str_newline.c_str() + stack_start));
+-      }
+-    } else {
+-      // Don't use the string with the newline, get a fresh version to send to
+-      // the debug message process. We also don't display assertions to the
+-      // user in release mode. The enduser can't do anything with this
+-      // information, and displaying message boxes when the application is
+-      // hosed can cause additional problems.
+-#ifndef NDEBUG
+-      if (!base::debug::BeingDebugged()) {
+-        // Displaying a dialog is unnecessary when debugging and can complicate
+-        // debugging.
+-        DisplayDebugMessageInDialog(stream_.str());
+-      }
+-#endif
+-      // Crash the process to generate a dump.
+-      base::debug::BreakDebugger();
+-    }
+-  }
++  if (severity_ == LOG_FATAL)
++    _exit(1);
+ }
+ 
+ // writes the common header info to the stream
+@@ -858,8 +248,10 @@ void LogMessage::Init(const char* file, int line) {
+   stream_ <<  '[';
+   if (g_log_process_id)
+     stream_ << CurrentProcessId() << ':';
++  /* <PUIC-PATCH>
+   if (g_log_thread_id)
+     stream_ << base::PlatformThread::CurrentId() << ':';
++  */
+   if (g_log_timestamp) {
+ #if defined(OS_POSIX)
+     timeval tv;
+@@ -932,15 +324,14 @@ BASE_EXPORT std::string SystemErrorCodeToString(SystemErrorCode error_code) {
+   if (len) {
+     // Messages returned by system end with line breaks.
+     return base::CollapseWhitespaceASCII(msgbuf, true) +
+-           base::StringPrintf(" (0x%lX)", error_code);
++        base::StringPrintf(" (0x%X)", error_code);
+   }
+-  return base::StringPrintf("Error (0x%lX) while retrieving error. (0x%lX)",
++  return base::StringPrintf("Error (0x%X) while retrieving error. (0x%X)",
+                             GetLastError(), error_code);
+ }
+ #elif defined(OS_POSIX)
+ BASE_EXPORT std::string SystemErrorCodeToString(SystemErrorCode error_code) {
+-  return base::safe_strerror(error_code) +
+-         base::StringPrintf(" (%d)", error_code);
++  return base::safe_strerror(error_code);
+ }
+ #else
+ #error Not implemented
+@@ -958,10 +349,6 @@ Win32ErrorLogMessage::Win32ErrorLogMessage(const char* file,
+ 
+ Win32ErrorLogMessage::~Win32ErrorLogMessage() {
+   stream() << ": " << SystemErrorCodeToString(err_);
+-  // We're about to crash (CHECK). Put |err_| on the stack (by placing it in a
+-  // field) and use Alias in hopes that it makes it into crash dumps.
+-  DWORD last_error = err_;
+-  base::debug::Alias(&last_error);
+ }
+ #elif defined(OS_POSIX)
+ ErrnoLogMessage::ErrnoLogMessage(const char* file,
+@@ -974,20 +361,9 @@ ErrnoLogMessage::ErrnoLogMessage(const char* file,
+ 
+ ErrnoLogMessage::~ErrnoLogMessage() {
+   stream() << ": " << SystemErrorCodeToString(err_);
+-  // We're about to crash (CHECK). Put |err_| on the stack (by placing it in a
+-  // field) and use Alias in hopes that it makes it into crash dumps.
+-  int last_error = err_;
+-  base::debug::Alias(&last_error);
+ }
+ #endif  // defined(OS_WIN)
+ 
+-void CloseLogFile() {
+-#if !defined(OS_WIN)
+-  LoggingLock logging_lock;
+-#endif
+-  CloseLogFileUnlocked();
+-}
+-
+ void RawLog(int level, const char* message) {
+   if (level >= g_min_log_level && message) {
+     size_t bytes_written = 0;
+@@ -1016,24 +392,12 @@ void RawLog(int level, const char* message) {
+   }
+ 
+   if (level == LOG_FATAL)
+-    base::debug::BreakDebugger();
++    _exit(1);
+ }
+ 
+ // This was defined at the beginning of this file.
+ #undef write
+ 
+-#if defined(OS_WIN)
+-bool IsLoggingToFileEnabled() {
+-  return g_logging_destination & LOG_TO_FILE;
+-}
+-
+-std::wstring GetLogFileFullPath() {
+-  if (g_log_file_name)
+-    return *g_log_file_name;
+-  return std::wstring();
+-}
+-#endif
+-
+ BASE_EXPORT void LogErrorNotReached(const char* file, int line) {
+   LogMessage(file, line, LOG_ERROR).stream()
+       << "NOTREACHED() hit.";
+diff --git a/logging.h b/logging.h
+index d020719..47cbbb8 100644
+--- a/logging.h
++++ b/logging.h
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++// <PUIC-PATCH>
++
+ #ifndef BASE_LOGGING_H_
+ #define BASE_LOGGING_H_
+ 
+@@ -17,7 +19,6 @@
+ #include "base/base_export.h"
+ #include "base/callback_forward.h"
+ #include "base/compiler_specific.h"
+-#include "base/debug/debugger.h"
+ #include "base/macros.h"
+ #include "base/strings/string_piece_forward.h"
+ #include "base/template_util.h"
+@@ -145,96 +146,12 @@
+ 
+ namespace logging {
+ 
+-// TODO(avi): do we want to do a unification of character types here?
+-#if defined(OS_WIN)
+-typedef wchar_t PathChar;
+-#else
+-typedef char PathChar;
+-#endif
+-
+-// Where to record logging output? A flat file and/or system debug log
+-// via OutputDebugString.
+ enum LoggingDestination {
+-  LOG_NONE                = 0,
+-  LOG_TO_FILE             = 1 << 0,
+-  LOG_TO_SYSTEM_DEBUG_LOG = 1 << 1,
+-
+-  LOG_TO_ALL = LOG_TO_FILE | LOG_TO_SYSTEM_DEBUG_LOG,
+-
+-  // On Windows, use a file next to the exe; on POSIX platforms, where
+-  // it may not even be possible to locate the executable on disk, use
+-  // stderr.
+-#if defined(OS_WIN)
+-  LOG_DEFAULT = LOG_TO_FILE,
+-#elif defined(OS_POSIX)
+-  LOG_DEFAULT = LOG_TO_SYSTEM_DEBUG_LOG,
+-#endif
++  LOG_NONE      = 0,
++  LOG_TO_STDERR = 1 << 0,
++  LOG_DEFAULT   = LOG_TO_STDERR,
+ };
+ 
+-// Indicates that the log file should be locked when being written to.
+-// Unless there is only one single-threaded process that is logging to
+-// the log file, the file should be locked during writes to make each
+-// log output atomic. Other writers will block.
+-//
+-// All processes writing to the log file must have their locking set for it to
+-// work properly. Defaults to LOCK_LOG_FILE.
+-enum LogLockingState { LOCK_LOG_FILE, DONT_LOCK_LOG_FILE };
+-
+-// On startup, should we delete or append to an existing log file (if any)?
+-// Defaults to APPEND_TO_OLD_LOG_FILE.
+-enum OldFileDeletionState { DELETE_OLD_LOG_FILE, APPEND_TO_OLD_LOG_FILE };
+-
+-struct BASE_EXPORT LoggingSettings {
+-  // The defaults values are:
+-  //
+-  //  logging_dest: LOG_DEFAULT
+-  //  log_file:     NULL
+-  //  lock_log:     LOCK_LOG_FILE
+-  //  delete_old:   APPEND_TO_OLD_LOG_FILE
+-  LoggingSettings();
+-
+-  LoggingDestination logging_dest;
+-
+-  // The three settings below have an effect only when LOG_TO_FILE is
+-  // set in |logging_dest|.
+-  const PathChar* log_file;
+-  LogLockingState lock_log;
+-  OldFileDeletionState delete_old;
+-};
+-
+-// Define different names for the BaseInitLoggingImpl() function depending on
+-// whether NDEBUG is defined or not so that we'll fail to link if someone tries
+-// to compile logging.cc with NDEBUG but includes logging.h without defining it,
+-// or vice versa.
+-#if defined(NDEBUG)
+-#define BaseInitLoggingImpl BaseInitLoggingImpl_built_with_NDEBUG
+-#else
+-#define BaseInitLoggingImpl BaseInitLoggingImpl_built_without_NDEBUG
+-#endif
+-
+-// Implementation of the InitLogging() method declared below.  We use a
+-// more-specific name so we can #define it above without affecting other code
+-// that has named stuff "InitLogging".
+-BASE_EXPORT bool BaseInitLoggingImpl(const LoggingSettings& settings);
+-
+-// Sets the log file name and other global logging state. Calling this function
+-// is recommended, and is normally done at the beginning of application init.
+-// If you don't call it, all the flags will be initialized to their default
+-// values, and there is a race condition that may leak a critical section
+-// object if two threads try to do the first log at the same time.
+-// See the definition of the enums above for descriptions and default values.
+-//
+-// The default log file is initialized to "debug.log" in the application
+-// directory. You probably don't want this, especially since the program
+-// directory may not be writable on an enduser's system.
+-//
+-// This function may be called a second time to re-direct logging (e.g after
+-// loging in to a user partition), however it should never be called more than
+-// twice.
+-inline bool InitLogging(const LoggingSettings& settings) {
+-  return BaseInitLoggingImpl(settings);
+-}
+-
+ // Sets the log level. Anything at or above this level will be written to the
+ // log file/displayed to the user (if applicable). Anything below this level
+ // will be silently ignored. The log level defaults to 0 (everything is logged
+@@ -268,31 +185,6 @@ int GetVlogLevel(const char (&file)[N]) {
+ BASE_EXPORT void SetLogItems(bool enable_process_id, bool enable_thread_id,
+                              bool enable_timestamp, bool enable_tickcount);
+ 
+-// Sets whether or not you'd like to see fatal debug messages popped up in
+-// a dialog box or not.
+-// Dialogs are not shown by default.
+-BASE_EXPORT void SetShowErrorDialogs(bool enable_dialogs);
+-
+-// Sets the Log Assert Handler that will be used to notify of check failures.
+-// Resets Log Assert Handler on object destruction.
+-// The default handler shows a dialog box and then terminate the process,
+-// however clients can use this function to override with their own handling
+-// (e.g. a silent one for Unit Tests)
+-using LogAssertHandlerFunction =
+-    base::Callback<void(const char* file,
+-                        int line,
+-                        const base::StringPiece message,
+-                        const base::StringPiece stack_trace)>;
+-
+-class BASE_EXPORT ScopedLogAssertHandler {
+- public:
+-  explicit ScopedLogAssertHandler(LogAssertHandlerFunction handler);
+-  ~ScopedLogAssertHandler();
+-
+- private:
+-  DISALLOW_COPY_AND_ASSIGN(ScopedLogAssertHandler);
+-};
+-
+ // Sets the Log Message Handler that gets passed every log message before
+ // it's sent to other log destinations (if any).
+ // Returns true to signal that it handled the message and the message
+@@ -306,9 +198,6 @@ BASE_EXPORT LogMessageHandlerFunction GetLogMessageHandler();
+ // to Clang which control what code paths are statically analyzed,
+ // and is meant to be used in conjunction with assert & assert-like functions.
+ // The expression is passed straight through if analysis isn't enabled.
+-//
+-// ANALYZER_SKIP_THIS_PATH() suppresses static analysis for the current
+-// codepath and any other branching codepaths that might follow.
+ #if defined(__clang_analyzer__)
+ 
+ inline constexpr bool AnalyzerNoReturn() __attribute__((analyzer_noreturn)) {
+@@ -321,16 +210,11 @@ inline constexpr bool AnalyzerAssumeTrue(bool arg) {
+   return arg || AnalyzerNoReturn();
+ }
+ 
+-#define ANALYZER_ASSUME_TRUE(arg) logging::AnalyzerAssumeTrue(!!(arg))
+-#define ANALYZER_SKIP_THIS_PATH() \
+-  static_cast<void>(::logging::AnalyzerNoReturn())
+-#define ANALYZER_ALLOW_UNUSED(var) static_cast<void>(var);
++#define ANALYZER_ASSUME_TRUE(arg) ::logging::AnalyzerAssumeTrue(!!(arg))
+ 
+ #else  // !defined(__clang_analyzer__)
+ 
+ #define ANALYZER_ASSUME_TRUE(arg) (arg)
+-#define ANALYZER_SKIP_THIS_PATH()
+-#define ANALYZER_ALLOW_UNUSED(var) static_cast<void>(var);
+ 
+ #endif  // defined(__clang_analyzer__)
+ 
+@@ -345,7 +229,7 @@ const LogSeverity LOG_FATAL = 3;
+ const LogSeverity LOG_NUM_SEVERITIES = 4;
+ 
+ // LOG_DFATAL is LOG_FATAL in debug mode, ERROR in normal mode
+-#if defined(NDEBUG)
++#ifdef NDEBUG
+ const LogSeverity LOG_DFATAL = LOG_ERROR;
+ #else
+ const LogSeverity LOG_DFATAL = LOG_FATAL;
+@@ -365,15 +249,17 @@ const LogSeverity LOG_DFATAL = LOG_FATAL;
+   ::logging::ClassName(__FILE__, __LINE__, ::logging::LOG_FATAL, ##__VA_ARGS__)
+ #define COMPACT_GOOGLE_LOG_EX_DFATAL(ClassName, ...) \
+   ::logging::ClassName(__FILE__, __LINE__, ::logging::LOG_DFATAL, ##__VA_ARGS__)
+-#define COMPACT_GOOGLE_LOG_EX_DCHECK(ClassName, ...) \
+-  ::logging::ClassName(__FILE__, __LINE__, ::logging::LOG_DCHECK, ##__VA_ARGS__)
+ 
+-#define COMPACT_GOOGLE_LOG_INFO COMPACT_GOOGLE_LOG_EX_INFO(LogMessage)
+-#define COMPACT_GOOGLE_LOG_WARNING COMPACT_GOOGLE_LOG_EX_WARNING(LogMessage)
+-#define COMPACT_GOOGLE_LOG_ERROR COMPACT_GOOGLE_LOG_EX_ERROR(LogMessage)
+-#define COMPACT_GOOGLE_LOG_FATAL COMPACT_GOOGLE_LOG_EX_FATAL(LogMessage)
+-#define COMPACT_GOOGLE_LOG_DFATAL COMPACT_GOOGLE_LOG_EX_DFATAL(LogMessage)
+-#define COMPACT_GOOGLE_LOG_DCHECK COMPACT_GOOGLE_LOG_EX_DCHECK(LogMessage)
++#define COMPACT_GOOGLE_LOG_INFO \
++  COMPACT_GOOGLE_LOG_EX_INFO(LogMessage)
++#define COMPACT_GOOGLE_LOG_WARNING \
++  COMPACT_GOOGLE_LOG_EX_WARNING(LogMessage)
++#define COMPACT_GOOGLE_LOG_ERROR \
++  COMPACT_GOOGLE_LOG_EX_ERROR(LogMessage)
++#define COMPACT_GOOGLE_LOG_FATAL \
++  COMPACT_GOOGLE_LOG_EX_FATAL(LogMessage)
++#define COMPACT_GOOGLE_LOG_DFATAL \
++  COMPACT_GOOGLE_LOG_EX_DFATAL(LogMessage)
+ 
+ #if defined(OS_WIN)
+ // wingdi.h defines ERROR to be 0. When we call LOG(ERROR), it gets
+@@ -600,13 +486,7 @@ class CheckOpResult {
+ #define CHECK(condition) \
+   UNLIKELY(!(condition)) ? IMMEDIATE_CRASH() : EAT_STREAM_PARAMETERS
+ 
+-// PCHECK includes the system error code, which is useful for determining
+-// why the condition failed. In official builds, preserve only the error code
+-// message so that it is available in crash reports. The stringified
+-// condition and any additional stream parameters are dropped.
+-#define PCHECK(condition)                                  \
+-  LAZY_STREAM(PLOG_STREAM(FATAL), UNLIKELY(!(condition))); \
+-  EAT_STREAM_PARAMETERS
++#define PCHECK(condition) CHECK(condition)
+ 
+ #define CHECK_OP(name, op, val1, val2) CHECK((val1) op (val2))
+ 
+@@ -769,11 +649,8 @@ DEFINE_CHECK_OP_IMPL(GT, > )
+ #define CHECK_GE(val1, val2) CHECK_OP(GE, >=, val1, val2)
+ #define CHECK_GT(val1, val2) CHECK_OP(GT, > , val1, val2)
+ 
+-#if defined(NDEBUG) && !defined(DCHECK_ALWAYS_ON)
++// <PUIC-PATCH>
+ #define DCHECK_IS_ON() 0
+-#else
+-#define DCHECK_IS_ON() 1
+-#endif
+ 
+ // Definitions for DLOG et al.
+ 
+@@ -815,17 +692,18 @@ DEFINE_CHECK_OP_IMPL(GT, > )
+ 
+ #if DCHECK_IS_ON()
+ 
+-#if defined(SYZYASAN)
+-BASE_EXPORT extern LogSeverity LOG_DCHECK;
+-#else
++#define COMPACT_GOOGLE_LOG_EX_DCHECK(ClassName, ...) \
++  COMPACT_GOOGLE_LOG_EX_FATAL(ClassName , ##__VA_ARGS__)
++#define COMPACT_GOOGLE_LOG_DCHECK COMPACT_GOOGLE_LOG_FATAL
+ const LogSeverity LOG_DCHECK = LOG_FATAL;
+-#endif
+ 
+ #else  // DCHECK_IS_ON()
+ 
+-// There may be users of LOG_DCHECK that are enabled independently
+-// of DCHECK_IS_ON(), so default to FATAL logging for those.
+-const LogSeverity LOG_DCHECK = LOG_FATAL;
++// These are just dummy values.
++#define COMPACT_GOOGLE_LOG_EX_DCHECK(ClassName, ...) \
++  COMPACT_GOOGLE_LOG_EX_INFO(ClassName , ##__VA_ARGS__)
++#define COMPACT_GOOGLE_LOG_DCHECK COMPACT_GOOGLE_LOG_INFO
++const LogSeverity LOG_DCHECK = LOG_INFO;
+ 
+ #endif  // DCHECK_IS_ON()
+ 
+@@ -1021,7 +899,7 @@ class BASE_EXPORT LogMessage {
+ // is not used" and "statement has no effect".
+ class LogMessageVoidify {
+  public:
+-  LogMessageVoidify() = default;
++  LogMessageVoidify() { }
+   // This has to be an operator with a precedence lower than << but
+   // higher than ?:
+   void operator&(std::ostream&) { }
+@@ -1080,12 +958,6 @@ class BASE_EXPORT ErrnoLogMessage {
+ };
+ #endif  // OS_WIN
+ 
+-// Closes the log file explicitly if open.
+-// NOTE: Since the log file is opened as necessary by the action of logging
+-//       statements, there's no guarantee that it will stay closed
+-//       after this call.
+-BASE_EXPORT void CloseLogFile();
+-
+ // Async signal safe logging mechanism.
+ BASE_EXPORT void RawLog(int level, const char* message);
+ 
+@@ -1099,14 +971,6 @@ BASE_EXPORT void RawLog(int level, const char* message);
+                         "Check failed: " #condition "\n"); \
+   } while (0)
+ 
+-#if defined(OS_WIN)
+-// Returns true if logging to file is enabled.
+-BASE_EXPORT bool IsLoggingToFileEnabled();
+-
+-// Returns the default log file path.
+-BASE_EXPORT std::wstring GetLogFileFullPath();
+-#endif
+-
+ }  // namespace logging
+ 
+ // Note that "The behavior of a C++ program is undefined if it adds declarations
+@@ -1130,9 +994,25 @@ inline std::ostream& operator<<(std::ostream& out, const std::wstring& wstr) {
+ }
+ }  // namespace std
+ 
+-// The NOTIMPLEMENTED() macro annotates codepaths which have not been
+-// implemented yet. If output spam is a serious concern,
+-// NOTIMPLEMENTED_LOG_ONCE can be used.
++// The NOTIMPLEMENTED() macro annotates codepaths which have
++// not been implemented yet.
++//
++// The implementation of this macro is controlled by NOTIMPLEMENTED_POLICY:
++//   0 -- Do nothing (stripped by compiler)
++//   1 -- Warn at compile time
++//   2 -- Fail at compile time
++//   3 -- Fail at runtime (DCHECK)
++//   4 -- [default] LOG(ERROR) at runtime
++//   5 -- LOG(ERROR) at runtime, only once per call-site
++
++#ifndef NOTIMPLEMENTED_POLICY
++#if defined(OS_ANDROID) && defined(OFFICIAL_BUILD)
++#define NOTIMPLEMENTED_POLICY 0
++#else
++// Select default policy: LOG(ERROR)
++#define NOTIMPLEMENTED_POLICY 4
++#endif
++#endif
+ 
+ #if defined(COMPILER_GCC)
+ // On Linux, with GCC, we can use __PRETTY_FUNCTION__ to get the demangled name
+@@ -1142,18 +1022,24 @@ inline std::ostream& operator<<(std::ostream& out, const std::wstring& wstr) {
+ #define NOTIMPLEMENTED_MSG "NOT IMPLEMENTED"
+ #endif
+ 
+-#if defined(OS_ANDROID) && defined(OFFICIAL_BUILD)
++#if NOTIMPLEMENTED_POLICY == 0
+ #define NOTIMPLEMENTED() EAT_STREAM_PARAMETERS
+-#define NOTIMPLEMENTED_LOG_ONCE() EAT_STREAM_PARAMETERS
+-#else
++#elif NOTIMPLEMENTED_POLICY == 1
++// TODO, figure out how to generate a warning
++#define NOTIMPLEMENTED() static_assert(false, "NOT_IMPLEMENTED")
++#elif NOTIMPLEMENTED_POLICY == 2
++#define NOTIMPLEMENTED() static_assert(false, "NOT_IMPLEMENTED")
++#elif NOTIMPLEMENTED_POLICY == 3
++#define NOTIMPLEMENTED() NOTREACHED()
++#elif NOTIMPLEMENTED_POLICY == 4
+ #define NOTIMPLEMENTED() LOG(ERROR) << NOTIMPLEMENTED_MSG
+-#define NOTIMPLEMENTED_LOG_ONCE()                      \
+-  do {                                                 \
+-    static bool logged_once = false;                   \
+-    LOG_IF(ERROR, !logged_once) << NOTIMPLEMENTED_MSG; \
+-    logged_once = true;                                \
+-  } while (0);                                         \
+-  EAT_STREAM_PARAMETERS
++#elif NOTIMPLEMENTED_POLICY == 5
++#define NOTIMPLEMENTED() do {\
++  static bool logged_once = false;\
++  LOG_IF(ERROR, !logged_once) << NOTIMPLEMENTED_MSG;\
++  logged_once = true;\
++} while(0);\
++EAT_STREAM_PARAMETERS
+ #endif
+ 
+ #endif  // BASE_LOGGING_H_
+diff --git a/memory/scoped_refptr.h b/memory/scoped_refptr.h
+index fb0a9c4..dde219f 100644
+--- a/memory/scoped_refptr.h
++++ b/memory/scoped_refptr.h
+@@ -1,6 +1,8 @@
+ // Copyright 2017 The Chromium Authors. All rights reserved.
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
++//
++// <PUIC-PATCH>
+ 
+ #ifndef BASE_MEMORY_SCOPED_REFPTR_H_
+ #define BASE_MEMORY_SCOPED_REFPTR_H_
+@@ -22,8 +24,6 @@ namespace base {
+ 
+ template <class, typename>
+ class RefCounted;
+-template <class, typename>
+-class RefCountedThreadSafe;
+ 
+ template <typename T>
+ scoped_refptr<T> AdoptRef(T* t);
+@@ -41,14 +41,6 @@ constexpr bool IsRefCountPreferenceOverridden(const T*,
+                        std::decay_t<decltype(U::kRefCountPreference)>>::value;
+ }
+ 
+-template <typename T, typename U, typename V>
+-constexpr bool IsRefCountPreferenceOverridden(
+-    const T*,
+-    const RefCountedThreadSafe<U, V>*) {
+-  return !std::is_same<std::decay_t<decltype(T::kRefCountPreference)>,
+-                       std::decay_t<decltype(U::kRefCountPreference)>>::value;
+-}
+-
+ constexpr bool IsRefCountPreferenceOverridden(...) {
+   return false;
+ }
+diff --git a/rand_util_posix.cc b/rand_util_posix.cc
+index 2c1653d..7dad9d2 100644
+--- a/rand_util_posix.cc
++++ b/rand_util_posix.cc
+@@ -10,8 +10,6 @@
+ #include <stdint.h>
+ #include <unistd.h>
+ 
+-#include "base/files/file_util.h"
+-#include "base/lazy_instance.h"
+ #include "base/logging.h"
+ #include "base/posix/eintr_wrapper.h"
+ 
+@@ -43,21 +41,33 @@ class URandomFd {
+   const int fd_;
+ };
+ 
+-base::LazyInstance<URandomFd>::Leaky g_urandom_fd = LAZY_INSTANCE_INITIALIZER;
+-
+ }  // namespace
+ 
+ namespace base {
+ 
++URandomFd g_urandom_fd;
++
++static bool readFromFD(int fd, char* buffer, size_t bytes) {
++  size_t total_read = 0;
++  while (total_read < bytes) {
++    ssize_t bytes_read =
++        HANDLE_EINTR(read(fd, buffer + total_read, bytes - total_read));
++    if (bytes_read <= 0)
++      break;
++    total_read += bytes_read;
++  }
++  return total_read == bytes;
++}
++
+ void RandBytes(void* output, size_t output_length) {
+-  const int urandom_fd = g_urandom_fd.Pointer()->fd();
++  const int urandom_fd = g_urandom_fd.fd();
+   const bool success =
+-      ReadFromFD(urandom_fd, static_cast<char*>(output), output_length);
++      readFromFD(urandom_fd, static_cast<char*>(output), output_length);
+   CHECK(success);
+ }
+ 
+ int GetUrandomFD(void) {
+-  return g_urandom_fd.Pointer()->fd();
++  return g_urandom_fd.fd();
+ }
+ 
+ }  // namespace base
+diff --git a/third_party/dmg_fp/dtoa.cc b/third_party/dmg_fp/dtoa.cc
+index 19dbdeb..768e63e 100644
+--- a/third_party/dmg_fp/dtoa.cc
++++ b/third_party/dmg_fp/dtoa.cc
+@@ -207,6 +207,7 @@ typedef unsigned Long ULong;
+ 
+ #include "stdlib.h"
+ #include "string.h"
++#include "limits.h"
+ 
+ #ifdef USE_LOCALE
+ #include "locale.h"

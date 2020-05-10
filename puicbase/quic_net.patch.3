@@ -1,0 +1,160 @@
+diff --git a/quic/core/quic_constants.h b/quic/core/quic_constants.h
+index 49c3ead..054b9e9 100644
+--- a/quic/core/quic_constants.h
++++ b/quic/core/quic_constants.h
+@@ -91,9 +91,6 @@ const QuicStreamId kInvalidStreamId = 0;
+ // Reserved ID for the crypto stream.
+ const QuicStreamId kCryptoStreamId = 1;
+ 
+-// Reserved ID for the headers stream.
+-const QuicStreamId kHeadersStreamId = 3;
+-
+ // Header key used to identify final offset on data stream when sending HTTP/2
+ // trailing headers over QUIC.
+ QUIC_EXPORT_PRIVATE extern const char* const kFinalOffsetHeaderKey;
+diff --git a/quic/core/quic_session.cc b/quic/core/quic_session.cc
+index 1b74b67..0ca05cb 100644
+--- a/quic/core/quic_session.cc
++++ b/quic/core/quic_session.cc
+@@ -283,9 +283,6 @@ void QuicSession::OnCanWrite() {
+     if (write_blocked_streams_.crypto_stream_blocked()) {
+       num_writes += 1;
+     }
+-    if (write_blocked_streams_.headers_stream_blocked()) {
+-      num_writes += 1;
+-    }
+   }
+   if (num_writes == 0) {
+     return;
+@@ -294,7 +291,7 @@ void QuicSession::OnCanWrite() {
+   QuicConnection::ScopedPacketFlusher flusher(
+       connection_, QuicConnection::SEND_ACK_IF_QUEUED);
+   for (size_t i = 0; i < num_writes; ++i) {
+-    if (!(write_blocked_streams_.HasWriteBlockedCryptoOrHeadersStream() ||
++    if (!(write_blocked_streams_.HasWriteBlockedCryptoStream() ||
+           write_blocked_streams_.HasWriteBlockedDataStreams())) {
+       // Writing one stream removed another!? Something's broken.
+       QUIC_BUG << "WriteBlockedStream is missing";
+@@ -330,7 +327,7 @@ bool QuicSession::WillingAndAbleToWrite() const {
+   // 3) connection is not flow control blocked and there are write blocked
+   // streams.
+   return !streams_with_pending_retransmission_.empty() ||
+-         write_blocked_streams_.HasWriteBlockedCryptoOrHeadersStream() ||
++         write_blocked_streams_.HasWriteBlockedCryptoStream() ||
+          (!flow_controller_.IsBlocked() &&
+           write_blocked_streams_.HasWriteBlockedDataStreams());
+ }
+@@ -896,7 +893,7 @@ void QuicSession::MarkConnectionLevelWriteBlocked(QuicStreamId id) {
+ }
+ 
+ bool QuicSession::HasDataToWrite() const {
+-  return write_blocked_streams_.HasWriteBlockedCryptoOrHeadersStream() ||
++  return write_blocked_streams_.HasWriteBlockedCryptoStream() ||
+          write_blocked_streams_.HasWriteBlockedDataStreams() ||
+          connection_->HasQueuedData();
+ }
+diff --git a/quic/core/quic_write_blocked_list.cc b/quic/core/quic_write_blocked_list.cc
+index 32f23cf..a8f3c04 100644
+--- a/quic/core/quic_write_blocked_list.cc
++++ b/quic/core/quic_write_blocked_list.cc
+@@ -8,8 +8,7 @@ namespace net {
+ 
+ QuicWriteBlockedList::QuicWriteBlockedList()
+     : last_priority_popped_(0),
+-      crypto_stream_blocked_(false),
+-      headers_stream_blocked_(false) {
++      crypto_stream_blocked_(false) {
+   memset(batch_write_stream_id_, 0, sizeof(batch_write_stream_id_));
+   memset(bytes_left_for_batch_write_, 0, sizeof(bytes_left_for_batch_write_));
+ }
+diff --git a/quic/core/quic_write_blocked_list.h b/quic/core/quic_write_blocked_list.h
+index 639c953..4ae4f02 100644
+--- a/quic/core/quic_write_blocked_list.h
++++ b/quic/core/quic_write_blocked_list.h
+@@ -30,8 +30,8 @@ class QUIC_EXPORT_PRIVATE QuicWriteBlockedList {
+     return priority_write_scheduler_.HasReadyStreams();
+   }
+ 
+-  bool HasWriteBlockedCryptoOrHeadersStream() const {
+-    return crypto_stream_blocked_ || headers_stream_blocked_;
++  bool HasWriteBlockedCryptoStream() const {
++    return crypto_stream_blocked_;
+   }
+ 
+   size_t NumBlockedStreams() const {
+@@ -39,9 +39,6 @@ class QUIC_EXPORT_PRIVATE QuicWriteBlockedList {
+     if (crypto_stream_blocked_) {
+       ++num_blocked;
+     }
+-    if (headers_stream_blocked_) {
+-      ++num_blocked;
+-    }
+ 
+     return num_blocked;
+   }
+@@ -53,12 +50,6 @@ class QUIC_EXPORT_PRIVATE QuicWriteBlockedList {
+     if (crypto_stream_blocked_) {
+       return true;  // If the crypto stream is blocked, all other streams yield.
+     }
+-    if (id == kHeadersStreamId) {
+-      return false;  // The crypto stream isn't blocked so headers won't yield.
+-    }
+-    if (headers_stream_blocked_) {
+-      return true;  // All data streams yield to the headers stream.
+-    }
+ 
+     return priority_write_scheduler_.ShouldYield(id);
+   }
+@@ -71,11 +62,6 @@ class QUIC_EXPORT_PRIVATE QuicWriteBlockedList {
+       return kCryptoStreamId;
+     }
+ 
+-    if (headers_stream_blocked_) {
+-      headers_stream_blocked_ = false;
+-      return kHeadersStreamId;
+-    }
+-
+     const auto id_and_precedence =
+         priority_write_scheduler_.PopNextReadyStreamAndPrecedence();
+     const QuicStreamId id = std::get<0>(id_and_precedence);
+@@ -131,11 +117,6 @@ class QUIC_EXPORT_PRIVATE QuicWriteBlockedList {
+       return;
+     }
+ 
+-    if (stream_id == kHeadersStreamId) {
+-      // TODO(avd) Add DCHECK(!headers_stream_blocked_);
+-      headers_stream_blocked_ = true;
+-      return;
+-    }
+     bool push_front =
+         stream_id == batch_write_stream_id_[last_priority_popped_] &&
+         bytes_left_for_batch_write_[last_priority_popped_] > 0;
+@@ -143,7 +124,6 @@ class QUIC_EXPORT_PRIVATE QuicWriteBlockedList {
+   }
+ 
+   bool crypto_stream_blocked() const { return crypto_stream_blocked_; }
+-  bool headers_stream_blocked() const { return headers_stream_blocked_; }
+ 
+  private:
+   QuicPriorityWriteScheduler priority_write_scheduler_;
+@@ -161,7 +141,6 @@ class QUIC_EXPORT_PRIVATE QuicWriteBlockedList {
+   SpdyPriority last_priority_popped_;
+ 
+   bool crypto_stream_blocked_;
+-  bool headers_stream_blocked_;
+ 
+   DISALLOW_COPY_AND_ASSIGN(QuicWriteBlockedList);
+ };
+diff --git a/quic/platform/impl/quic_socket_address_impl.cc b/quic/platform/impl/quic_socket_address_impl.cc
+index b17b16f..67dfcfe 100644
+--- a/quic/platform/impl/quic_socket_address_impl.cc
++++ b/quic/platform/impl/quic_socket_address_impl.cc
+@@ -19,7 +19,7 @@ QuicSocketAddressImpl::QuicSocketAddressImpl(QuicIpAddressImpl address,
+     : socket_address_(address.ip_address(), port) {}
+ 
+ QuicSocketAddressImpl::QuicSocketAddressImpl(
+-    const struct sockaddr_storage& saddr) 
++    const struct sockaddr_storage& saddr)
+     : QuicSocketAddressImpl(reinterpret_cast<const sockaddr*>(&saddr)) {}
+ 
+ QuicSocketAddressImpl::QuicSocketAddressImpl(const struct sockaddr* saddr) {

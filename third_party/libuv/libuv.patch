@@ -1,0 +1,386 @@
+diff --git a/third_party/libuv/1.18.0/include/uv-unix.h b/third_party/libuv/1.18.0/include/uv-unix.h
+index da32f86..d33d9a0 100644
+--- a/third_party/libuv/1.18.0/include/uv-unix.h
++++ b/third_party/libuv/1.18.0/include/uv-unix.h
+@@ -219,6 +219,7 @@ typedef struct {
+   } timer_heap;                                                               \
+   uint64_t timer_counter;                                                     \
+   uint64_t time;                                                              \
++  uint64_t hrtime;                                                            \
+   int signal_pipefd[2];                                                       \
+   uv__io_t signal_io_watcher;                                                 \
+   uv_signal_t child_watcher;                                                  \
+diff --git a/third_party/libuv/1.18.0/include/uv-win.h b/third_party/libuv/1.18.0/include/uv-win.h
+index b96bed2..5068b16 100644
+--- a/third_party/libuv/1.18.0/include/uv-win.h
++++ b/third_party/libuv/1.18.0/include/uv-win.h
+@@ -315,6 +315,8 @@ RB_HEAD(uv_timer_tree_s, uv_timer_s);
+   HANDLE iocp;                                                                \
+   /* The current time according to the event loop. in msecs. */               \
+   uint64_t time;                                                              \
++  /* The current time according to the event loop. in nanosecs. */            \
++  uint64_t hrtime;                                                            \
+   /* Tail of a single-linked circular queue of pending reqs. If the queue */  \
+   /* is empty, tail_ is NULL. If there is only one item, */                   \
+   /* tail_->next_req == tail_ */                                              \
+diff --git a/third_party/libuv/1.18.0/include/uv.h b/third_party/libuv/1.18.0/include/uv.h
+index b11666e..1b6cfc2 100644
+--- a/third_party/libuv/1.18.0/include/uv.h
++++ b/third_party/libuv/1.18.0/include/uv.h
+@@ -40,7 +40,11 @@ extern "C" {
+ #   define UV_EXTERN /* nothing */
+ # endif
+ #elif __GNUC__ >= 4
+-# define UV_EXTERN __attribute__((visibility("default")))
++# if defined(BUILDING_UV_SHARED)
++#   define UV_EXTERN __attribute__((visibility("default")))
++# else
++#   define UV_EXTERN /* nothing */
++# endif
+ #else
+ # define UV_EXTERN /* nothing */
+ #endif
+@@ -287,6 +291,7 @@ UV_EXTERN int uv_has_ref(const uv_handle_t*);
+ 
+ UV_EXTERN void uv_update_time(uv_loop_t*);
+ UV_EXTERN uint64_t uv_now(const uv_loop_t*);
++UV_EXTERN uint64_t uv_hrnow(const uv_loop_t*);
+ 
+ UV_EXTERN int uv_backend_fd(const uv_loop_t*);
+ UV_EXTERN int uv_backend_timeout(const uv_loop_t*);
+diff --git a/third_party/libuv/1.18.0/src/threadpool.c b/third_party/libuv/1.18.0/src/threadpool.c
+index 1089341..cbdf184 100644
+--- a/third_party/libuv/1.18.0/src/threadpool.c
++++ b/third_party/libuv/1.18.0/src/threadpool.c
+@@ -168,7 +168,7 @@ static void init_threads(void) {
+ #ifndef _WIN32
+ static void reset_once(void) {
+   uv_once_t child_once = UV_ONCE_INIT;
+-  memcpy(&once, &child_once, sizeof(child_once));
++  memcpy((void*)&once, (const void*)&child_once, sizeof(child_once));
+ }
+ #endif
+ 
+diff --git a/third_party/libuv/1.18.0/src/unix/internal.h b/third_party/libuv/1.18.0/src/unix/internal.h
+index 3df5c4c..5ad7e56 100644
+--- a/third_party/libuv/1.18.0/src/unix/internal.h
++++ b/third_party/libuv/1.18.0/src/unix/internal.h
+@@ -317,9 +317,8 @@ static const int kFSEventStreamEventFlagItemIsSymlink = 0x00040000;
+ #endif /* defined(__APPLE__) */
+ 
+ UV_UNUSED(static void uv__update_time(uv_loop_t* loop)) {
+-  /* Use a fast time source if available.  We only need millisecond precision.
+-   */
+-  loop->time = uv__hrtime(UV_CLOCK_FAST) / 1000000;
++  loop->hrtime = uv__hrtime(UV_CLOCK_PRECISE);
++  loop->time = loop->hrtime / 1000000;
+ }
+ 
+ UV_UNUSED(static char* uv__basename_r(const char* path)) {
+diff --git a/third_party/libuv/1.18.0/src/unix/udp.c b/third_party/libuv/1.18.0/src/unix/udp.c
+index a475bf5..b1e7fb0 100644
+--- a/third_party/libuv/1.18.0/src/unix/udp.c
++++ b/third_party/libuv/1.18.0/src/unix/udp.c
+@@ -39,6 +39,25 @@
+ # define IPV6_DROP_MEMBERSHIP IPV6_LEAVE_GROUP
+ #endif
+ 
++#if defined(UV_UDP_MTU_DGRAM)
++# define UDP_DGRAM_MAXSIZE 1500
++#else
++# define UDP_DGRAM_MAXSIZE 65536
++#endif
++
++#if defined(UV_ENABLE_UDP_MMSG)
++# define UV_ENABLE_UDP_RECVMMSG 1
++# define UV_ENABLE_UDP_SENDMMSG 1
++#endif
++
++#if defined(UV_ENABLE_UDP_RECVMMSG)
++# define MSGNUM_PER_UDP_RECVMMSG 32
++#endif
++
++#if defined(UV_ENABLE_UDP_SENDMMSG)
++# define MSGNUM_PER_UDP_SENDMMSG 32
++#endif
++
+ 
+ static void uv__udp_run_completed(uv_udp_t* handle);
+ static void uv__udp_io(uv_loop_t* loop, uv__io_t* w, unsigned int revents);
+@@ -148,6 +167,106 @@ static void uv__udp_io(uv_loop_t* loop, uv__io_t* w, unsigned int revents) {
+ }
+ 
+ 
++#if defined(UV_ENABLE_UDP_RECVMMSG)
++static void uv__udp_recvmsg(uv_udp_t* handle) {
++  struct mmsghdr msgs[MSGNUM_PER_UDP_RECVMMSG];
++  struct iovec iov[MSGNUM_PER_UDP_RECVMMSG];
++  struct sockaddr_storage peers[MSGNUM_PER_UDP_RECVMMSG];
++  ssize_t nreqs, nress;
++  uv_buf_t buf, lastbuf, msgbuf;
++  int count;
++  size_t per_iov_len;
++  const struct sockaddr *addr;
++  int flags;
++  int i;
++
++  assert(handle->recv_cb != NULL);
++  assert(handle->alloc_cb != NULL);
++
++  lastbuf = uv_buf_init(NULL, 0);
++
++  /* Prevent loop starvation when the data comes in as fast as (or faster than)
++   * we can read it. XXX Need to rearm fd if we switch to edge-triggered I/O.
++   */
++  count = 32;
++
++read_loop:
++  buf = uv_buf_init(NULL, 0);
++  handle->alloc_cb((uv_handle_t*) handle, UDP_DGRAM_MAXSIZE, &buf);
++  if (buf.base == NULL || buf.len == 0) {
++    handle->recv_cb(handle, UV_ENOBUFS, &buf, NULL, 0);
++    return;
++  }
++  assert(buf.base != NULL);
++
++  if (buf.base != lastbuf.base || buf.len != lastbuf.len) {
++    // reinit
++    nreqs = buf.len / UDP_DGRAM_MAXSIZE;
++    if (nreqs < 1) {
++      nreqs = 1;
++      per_iov_len = buf.len;
++    } else if (nreqs > MSGNUM_PER_UDP_RECVMMSG) {
++      nreqs = MSGNUM_PER_UDP_RECVMMSG;
++      per_iov_len = UDP_DGRAM_MAXSIZE;
++    } else {
++      per_iov_len = UDP_DGRAM_MAXSIZE;
++    }
++
++    for (i = 0; i < nreqs; ++i) {
++      memset(&msgs[i], 0, sizeof(msgs[0]));
++      iov[i].iov_base = buf.base + i * per_iov_len;
++      iov[i].iov_len = per_iov_len;
++      msgs[i].msg_hdr.msg_iov = &iov[i];
++      msgs[i].msg_hdr.msg_iovlen = 1;
++      msgs[i].msg_hdr.msg_name = &peers[i];
++      msgs[i].msg_hdr.msg_namelen = sizeof(peers[0]);
++    }
++
++    lastbuf = buf;
++  } else {
++    // reset
++    for (i = 0; i < nreqs; ++i) {
++      msgs[i].msg_hdr.msg_namelen = sizeof(peers[0]);
++    }
++  }
++
++  do {
++    nress = recvmmsg(handle->io_watcher.fd, msgs, nreqs, 0, NULL);
++  }
++  while (nress == -1 && errno == EINTR);
++
++  if (nress == -1) {
++    if (errno == EAGAIN || errno == EWOULDBLOCK)
++      handle->recv_cb(handle, 0, &buf, NULL, 0);
++    else
++      handle->recv_cb(handle, -errno, &buf, NULL, 0);
++  }
++  else {
++    for (i = 0; i < nress; ++i) {
++      if (msgs[i].msg_hdr.msg_namelen == 0)
++        addr = NULL;
++      else
++        addr = (const struct sockaddr*) &peers[i];
++
++      flags = 0;
++      if (msgs[i].msg_hdr.msg_flags & MSG_TRUNC)
++        flags |= UV_UDP_PARTIAL;
++
++      msgbuf = uv_buf_init(iov[i].iov_base, iov[i].iov_len);
++      handle->recv_cb(handle, msgs[i].msg_len, &msgbuf, addr, flags);
++    }
++    // mark the end.
++    handle->recv_cb(handle, 0, &buf, NULL, 0);
++  }
++
++  if (nress == nreqs
++      && count-- > 0
++      && handle->io_watcher.fd != -1
++      && handle->recv_cb != NULL) {
++    goto read_loop;
++  }
++}
++#else
+ static void uv__udp_recvmsg(uv_udp_t* handle) {
+   struct sockaddr_storage peer;
+   struct msghdr h;
+@@ -169,7 +288,7 @@ static void uv__udp_recvmsg(uv_udp_t* handle) {
+ 
+   do {
+     buf = uv_buf_init(NULL, 0);
+-    handle->alloc_cb((uv_handle_t*) handle, 64 * 1024, &buf);
++    handle->alloc_cb((uv_handle_t*) handle, UDP_DGRAM_MAXSIZE, &buf);
+     if (buf.base == NULL || buf.len == 0) {
+       handle->recv_cb(handle, UV_ENOBUFS, &buf, NULL, 0);
+       return;
+@@ -211,8 +330,77 @@ static void uv__udp_recvmsg(uv_udp_t* handle) {
+       && handle->io_watcher.fd != -1
+       && handle->recv_cb != NULL);
+ }
++#endif
++
++
++#if defined(UV_ENABLE_UDP_SENDMMSG)
++static void uv__udp_sendmsg(uv_udp_t* handle) {
++  struct mmsghdr msgs[MSGNUM_PER_UDP_SENDMMSG];
++  ssize_t nreqs, nress;
++  QUEUE* q;
++  uv_udp_send_t* req;
++  int err;
++  int i;
++
++write_loop:
++  if (QUEUE_EMPTY(&handle->write_queue)) {
++    return;
++  }
++
++  i = 0;
++  QUEUE_FOREACH(q, &handle->write_queue) {
++    assert(q != NULL);
++
++    req = QUEUE_DATA(q, uv_udp_send_t, queue);
++    assert(req != NULL);
++
++    memset(&msgs[i], 0, sizeof(msgs[0]));
++    msgs[i].msg_hdr.msg_name = &req->addr;
++    msgs[i].msg_hdr.msg_namelen = (req->addr.ss_family == AF_INET6 ?
++      sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
++    msgs[i].msg_hdr.msg_iov = (struct iovec*) req->bufs;
++    msgs[i].msg_hdr.msg_iovlen = req->nbufs;
++
++    if (++i >= MSGNUM_PER_UDP_SENDMMSG)
++      break;
++  }
++  nreqs = i;
++
++  do {
++    nress = sendmmsg(handle->io_watcher.fd, msgs, nreqs, 0);
++  } while (nress == -1 && errno == EINTR);
++
++  err = 0;
++  if (nress == -1) {
++    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)
++      return;
++
++    err = 1;
++    nress = nreqs;
++  }
++
++  for (i = 0; i < nress; ++i) {
++    q = QUEUE_HEAD(&handle->write_queue);
++    assert(q != NULL);
++
++    req = QUEUE_DATA(q, uv_udp_send_t, queue);
++    assert(req != NULL);
+ 
++    req->status = err ? -errno : msgs[i].msg_len;
+ 
++    /* Sending a datagram is an atomic operation: either all data
++     * is written or nothing is (and EMSGSIZE is raised). That is
++     * why we don't handle partial writes. Just pop the request
++     * off the write queue and onto the completed queue, done.
++     */
++    QUEUE_REMOVE(&req->queue);
++    QUEUE_INSERT_TAIL(&handle->write_completed_queue, &req->queue);
++    uv__io_feed(handle->loop, &handle->io_watcher);
++  }
++
++  goto write_loop;
++}
++#else
+ static void uv__udp_sendmsg(uv_udp_t* handle) {
+   uv_udp_send_t* req;
+   QUEUE* q;
+@@ -254,6 +442,7 @@ static void uv__udp_sendmsg(uv_udp_t* handle) {
+     uv__io_feed(handle->loop, &handle->io_watcher);
+   }
+ }
++#endif
+ 
+ 
+ /* On the BSDs, SO_REUSEPORT implies SO_REUSEADDR but with some additional
+@@ -427,18 +616,7 @@ int uv__udp_send(uv_udp_send_t* req,
+   QUEUE_INSERT_TAIL(&handle->write_queue, &req->queue);
+   uv__handle_start(handle);
+ 
+-  if (empty_queue && !(handle->flags & UV_UDP_PROCESSING)) {
+-    uv__udp_sendmsg(handle);
+-
+-    /* `uv__udp_sendmsg` may not be able to do non-blocking write straight
+-     * away. In such cases the `io_watcher` has to be queued for asynchronous
+-     * write.
+-     */
+-    if (!QUEUE_EMPTY(&handle->write_queue))
+-      uv__io_start(handle->loop, &handle->io_watcher, POLLOUT);
+-  } else {
+-    uv__io_start(handle->loop, &handle->io_watcher, POLLOUT);
+-  }
++  uv__io_start(handle->loop, &handle->io_watcher, POLLOUT);
+ 
+   return 0;
+ }
+diff --git a/third_party/libuv/1.18.0/src/uv-common.c b/third_party/libuv/1.18.0/src/uv-common.c
+index bc7d137..f207270 100644
+--- a/third_party/libuv/1.18.0/src/uv-common.c
++++ b/third_party/libuv/1.18.0/src/uv-common.c
+@@ -430,6 +430,12 @@ uint64_t uv_now(const uv_loop_t* loop) {
+ }
+ 
+ 
++uint64_t uv_hrnow(const uv_loop_t* loop) {
++  return loop->hrtime;
++}
++
++
++
+ 
+ size_t uv__count_bufs(const uv_buf_t bufs[], unsigned int nbufs) {
+   unsigned int i;
+diff --git a/third_party/libuv/1.18.0/src/win/core.c b/third_party/libuv/1.18.0/src/win/core.c
+index 9ed4e82..7933c3b 100644
+--- a/third_party/libuv/1.18.0/src/win/core.c
++++ b/third_party/libuv/1.18.0/src/win/core.c
+@@ -235,6 +235,7 @@ int uv_loop_init(uv_loop_t* loop) {
+    * to zero before calling uv_update_time for the first time.
+    */
+   loop->time = 0;
++  loop->hrtime = 0;
+   uv_update_time(loop);
+ 
+   QUEUE_INIT(&loop->wq);
+diff --git a/third_party/libuv/1.18.0/src/win/timer.c b/third_party/libuv/1.18.0/src/win/timer.c
+index 7e006fe..37122be 100644
+--- a/third_party/libuv/1.18.0/src/win/timer.c
++++ b/third_party/libuv/1.18.0/src/win/timer.c
+@@ -28,14 +28,16 @@
+ #include "handle-inl.h"
+ 
+ 
+-/* The number of milliseconds in one second. */
+-#define UV__MILLISEC 1000
++/* The number of nanoseconds in one second. */
++#define UV__NANOSEC 1000000000
+ 
+ 
+ void uv_update_time(uv_loop_t* loop) {
+-  uint64_t new_time = uv__hrtime(UV__MILLISEC);
+-  assert(new_time >= loop->time);
+-  loop->time = new_time;
++  uint64_t new_hrtime = uv__hrtime(UV__NANOSEC);
++  if (new_hrtime > loop->hrtime) {
++    loop->hrtime = new_hrtime;
++    loop->time = loop->hrtime / 1000000;
++  }
+ }
+ 
+ 

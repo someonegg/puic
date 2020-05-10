@@ -1,0 +1,96 @@
+diff --git a/quic/core/crypto/quic_crypto_client_config.cc b/quic/core/crypto/quic_crypto_client_config.cc
+index 0d0eac4..89734cc 100644
+--- a/quic/core/crypto/quic_crypto_client_config.cc
++++ b/quic/core/crypto/quic_crypto_client_config.cc
+@@ -396,7 +396,9 @@ void QuicCryptoClientConfig::FillInchoateClientHello(
+   // FLAGS_quic_use_chlo_packet_size
+   out->set_minimum_size(kClientHelloMinimumSize);
+ 
+-  out->SetStringPiece(kSNI, server_id.host());
++  if (!server_id.is_literal_ip()) {
++    out->SetStringPiece(kSNI, server_id.host());
++  }
+   out->SetVersion(kVER, preferred_version);
+ 
+   if (!user_agent_id_.empty()) {
+diff --git a/quic/core/quic_server_id.cc b/quic/core/quic_server_id.cc
+index 8efb881..0d28917 100644
+--- a/quic/core/quic_server_id.cc
++++ b/quic/core/quic_server_id.cc
+@@ -13,19 +13,30 @@ using std::string;
+ 
+ namespace net {
+ 
+-QuicServerId::QuicServerId() : privacy_mode_(PRIVACY_MODE_DISABLED) {}
++QuicServerId::QuicServerId()
++    : privacy_mode_(PRIVACY_MODE_DISABLED), is_literal_ip_(false) {}
+ 
+ QuicServerId::QuicServerId(const HostPortPair& host_port_pair,
+-                           PrivacyMode privacy_mode)
+-    : host_port_pair_(host_port_pair), privacy_mode_(privacy_mode) {}
++                           PrivacyMode privacy_mode,
++                           bool is_literal_ip)
++    : host_port_pair_(host_port_pair),
++      privacy_mode_(privacy_mode),
++      is_literal_ip_(is_literal_ip) {}
+ 
+-QuicServerId::QuicServerId(const string& host, uint16_t port)
+-    : host_port_pair_(host, port), privacy_mode_(PRIVACY_MODE_DISABLED) {}
++QuicServerId::QuicServerId(const string& host,
++                           uint16_t port,
++                           bool is_literal_ip)
++    : host_port_pair_(host, port),
++      privacy_mode_(PRIVACY_MODE_DISABLED),
++      is_literal_ip_(is_literal_ip) {}
+ 
+ QuicServerId::QuicServerId(const string& host,
+                            uint16_t port,
+-                           PrivacyMode privacy_mode)
+-    : host_port_pair_(host, port), privacy_mode_(privacy_mode) {}
++                           PrivacyMode privacy_mode,
++                           bool is_literal_ip)
++    : host_port_pair_(host, port),
++      privacy_mode_(privacy_mode),
++      is_literal_ip_(is_literal_ip) {}
+ 
+ QuicServerId::~QuicServerId() {}
+ 
+diff --git a/quic/core/quic_server_id.h b/quic/core/quic_server_id.h
+index 880afd2..37803a0 100644
+--- a/quic/core/quic_server_id.h
++++ b/quic/core/quic_server_id.h
+@@ -20,11 +20,16 @@ namespace net {
+ class QUIC_EXPORT_PRIVATE QuicServerId {
+  public:
+   QuicServerId();
+-  QuicServerId(const HostPortPair& host_port_pair, PrivacyMode privacy_mode);
+-  QuicServerId(const std::string& host, uint16_t port);
++  QuicServerId(const HostPortPair& host_port_pair,
++               PrivacyMode privacy_mode,
++               bool is_literal_ip);
+   QuicServerId(const std::string& host,
+                uint16_t port,
+-               PrivacyMode privacy_mode);
++               bool is_literal_ip);
++  QuicServerId(const std::string& host,
++               uint16_t port,
++               PrivacyMode privacy_mode,
++               bool is_literal_ip);
+   ~QuicServerId();
+ 
+   // Needed to be an element of std::set.
+@@ -44,11 +49,14 @@ class QUIC_EXPORT_PRIVATE QuicServerId {
+ 
+   PrivacyMode privacy_mode() const { return privacy_mode_; }
+ 
++  bool is_literal_ip() const { return is_literal_ip_; }
++
+   size_t EstimateMemoryUsage() const;
+ 
+  private:
+   HostPortPair host_port_pair_;
+   PrivacyMode privacy_mode_;
++  bool is_literal_ip_;
+ };
+ 
+ }  // namespace net
