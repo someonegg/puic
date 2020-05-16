@@ -120,7 +120,7 @@ public:
 
     void StartRead()
     {
-        if (reading())
+        if (reading() || m_readeof)
             return;
 
         int r = uv_read_start((uv_stream_t*)&m_socket, on_uv_alloc, on_uv_read);
@@ -134,7 +134,7 @@ public:
 
     void StopRead()
     {
-        if (!reading())
+        if (!reading() || m_readeof)
             return;
 
         uv_read_stop((uv_stream_t*)&m_socket);
@@ -163,7 +163,7 @@ public:
     void Write(const uv_buf_t bufs[], int nbufs, size_t len)
     {
         assert(!writing());
-        if (writing() || len == 0)
+        if (writing() || len == 0 || m_writeof)
             return;
 
         m_write.data = (void*)len;
@@ -178,12 +178,10 @@ public:
 
     void Shutdown()
     {
-        int r = uv_shutdown(&m_shutdown, (uv_stream_t*)&m_socket, on_uv_shutdown);
-        if (r != 0)
-        {
-            m_callback->OnTCPConnErr("tcp_shutdown", r);
+        if (m_writeof)
             return;
-        }
+
+        uv_shutdown(&m_shutdown, (uv_stream_t*)&m_socket, on_uv_shutdown);
     }
 
 private:
@@ -193,7 +191,6 @@ private:
             return;
         if (m_callback != nullptr)
             m_callback->OnTCPConnClosed();
-        m_callback = nullptr;
         uv_close((uv_handle_t*)&m_socket, on_uv_close);
     }
 
@@ -234,6 +231,11 @@ private:
     static void on_uv_close(uv_handle_t* handle)
     {
         TCPConn* pThis = (TCPConn*)handle->data;
+        pThis->m_callback = nullptr;
+        pThis->m_reading = false;
+        pThis->m_readeof = true;
+        pThis->m_writing = false;
+        pThis->m_writeof = true;
         pThis->m_uvclosed = true;
         if (pThis->m_closed)
             delete pThis;
@@ -267,6 +269,7 @@ private:
         if (nread == UV_EOF)
         {
             pThis->m_callback->OnTCPConnEOF();
+            pThis->m_reading = false;
             pThis->m_readeof = true;
             if (pThis->m_writeof)
                 pThis->close();
@@ -315,6 +318,7 @@ private:
             return;
         }
 
+        pThis->m_writing = false;
         pThis->m_writeof = true;
         if (pThis->m_readeof)
             pThis->close();

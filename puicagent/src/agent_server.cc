@@ -79,7 +79,7 @@ void AgentConn::Close()
 
 void AgentConn::StartRead()
 {
-    if (reading())
+    if (reading() || m_readeof)
         return;
 
     int r = uv_read_start((uv_stream_t*)&m_socket, on_uv_alloc, on_uv_read);
@@ -93,7 +93,7 @@ void AgentConn::StartRead()
 
 void AgentConn::StopRead()
 {
-    if (!reading())
+    if (!reading() || m_readeof)
         return;
 
     uv_read_stop((uv_stream_t*)&m_socket);
@@ -103,7 +103,7 @@ void AgentConn::StopRead()
 void AgentConn::Write(const uv_buf_t bufs[], int nbufs, size_t len)
 {
     assert(!writing());
-    if (writing() || len == 0)
+    if (writing() || len == 0 || m_writeof)
         return;
 
     m_write.data = (void*)len;
@@ -118,12 +118,10 @@ void AgentConn::Write(const uv_buf_t bufs[], int nbufs, size_t len)
 
 void AgentConn::Shutdown()
 {
-    int r = uv_shutdown(&m_shutdown, (uv_stream_t*)&m_socket, on_uv_shutdown);
-    if (r != 0)
-    {
-        m_callback->OnAgentConnErr("tcp_shutdown", r);
+    if (m_writeof)
         return;
-    }
+
+    uv_shutdown(&m_shutdown, (uv_stream_t*)&m_socket, on_uv_shutdown);
 }
 
 void AgentConn::close()
@@ -132,7 +130,6 @@ void AgentConn::close()
         return;
     if (m_callback != nullptr)
         m_callback->OnAgentConnClosed();
-    m_callback = nullptr;
     uv_close((uv_handle_t*)&m_socket, on_uv_close);
 }
 
@@ -175,6 +172,11 @@ void AgentConn::client_handshaked()
 void AgentConn::on_uv_close(uv_handle_t* handle)
 {
     AgentConn* pThis = (AgentConn*)handle->data;
+    pThis->m_callback = nullptr;
+    pThis->m_reading = false;
+    pThis->m_readeof = true;
+    pThis->m_writing = false;
+    pThis->m_writeof = true;
     pThis->m_uvclosed = true;
     if (pThis->m_closed)
         delete pThis;
@@ -208,6 +210,7 @@ void AgentConn::on_uv_read(uv_stream_t* handle, ssize_t nread, const uv_buf_t* b
     if (nread == UV_EOF)
     {
         pThis->m_callback->OnAgentConnEOF();
+        pThis->m_reading = false;
         pThis->m_readeof = true;
         if (pThis->m_writeof)
             pThis->close();
@@ -256,6 +259,7 @@ void AgentConn::on_uv_shutdown(uv_shutdown_t* req, int status)
         return;
     }
 
+    pThis->m_writing = false;
     pThis->m_writeof = true;
     if (pThis->m_readeof)
         pThis->close();

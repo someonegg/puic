@@ -44,7 +44,10 @@ PuicSessionInterface* PuicStream::Session() {
 }
 
 bool PuicStream::IsEOF() {
-  return sequencer()->IsClosed();
+  bool eof = sequencer()->IsClosed();
+  if (eof)
+    StopReading();
+  return eof;
 }
 
 size_t PuicStream::Read(char* data, size_t size)
