@@ -43,7 +43,7 @@ struct PuicDispatcherConfig {
 
   size_t max_idle_timeout_secs = 120;
 
-  size_t default_idle_timeout_secs = 80;
+  size_t default_idle_timeout_secs = 50;
 
   size_t initial_stream_window = 512 * 1024;
 

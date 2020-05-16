@@ -85,7 +85,7 @@ class PuicSessionInterface {
 struct PuicClientSessionConfig {
   size_t handshake_timeout_secs = 5;
 
-  size_t idle_timeout_secs = 80;
+  size_t idle_timeout_secs = 50;
 
   size_t stream_window = 1024 * 1024;
 
