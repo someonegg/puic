@@ -14,7 +14,11 @@ AgentConn::AgentConn(AgentServer &server)
     : m_server(server)
     , m_callback(nullptr)
     , m_reading(false)
+    , m_readeof(false)
     , m_writing(false)
+    , m_writeof(false)
+    , m_closed(false)
+    , m_uvclosed(false)
 {
 }
 
@@ -40,6 +44,7 @@ void AgentConn::Accept()
     if (r != 0)
     {
         logger->error("agent client accept failed, code={0:d}", r);
+        m_closed = true;
         close();
         return;
     }
@@ -63,6 +68,12 @@ void AgentConn::Proxy(Callback* cb)
 
 void AgentConn::Close()
 {
+    m_closed = true;
+    if (m_uvclosed)
+    {
+        delete this;
+        return;
+    }
     close();
 }
 
@@ -117,8 +128,12 @@ void AgentConn::Shutdown()
 
 void AgentConn::close()
 {
-    uv_close((uv_handle_t*)&m_socket, on_uv_close);
+    if (uv_is_closing((uv_handle_t*)&m_socket))
+        return;
+    if (m_callback != nullptr)
+        m_callback->OnAgentConnClosed();
     m_callback = nullptr;
+    uv_close((uv_handle_t*)&m_socket, on_uv_close);
 }
 
 static void get_sockaddr_name(sockaddr_storage &ss, char* ip, size_t len, int &port)
@@ -160,7 +175,9 @@ void AgentConn::client_handshaked()
 void AgentConn::on_uv_close(uv_handle_t* handle)
 {
     AgentConn* pThis = (AgentConn*)handle->data;
-    delete pThis;
+    pThis->m_uvclosed = true;
+    if (pThis->m_closed)
+        delete pThis;
 }
 
 void AgentConn::on_uv_alloc(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf)
@@ -191,6 +208,9 @@ void AgentConn::on_uv_read(uv_stream_t* handle, ssize_t nread, const uv_buf_t* b
     if (nread == UV_EOF)
     {
         pThis->m_callback->OnAgentConnEOF();
+        pThis->m_readeof = true;
+        if (pThis->m_writeof)
+            pThis->close();
         return;
     }
 
@@ -235,6 +255,10 @@ void AgentConn::on_uv_shutdown(uv_shutdown_t* req, int status)
         pThis->m_callback->OnAgentConnErr("tcp_shutdown", status);
         return;
     }
+
+    pThis->m_writeof = true;
+    if (pThis->m_readeof)
+        pThis->close();
 }
 
 AgentServer::AgentServer(uv_loop_t* loop, const sockaddr_storage &lisSS)

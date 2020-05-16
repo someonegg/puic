@@ -20,6 +20,7 @@ public:
     public:
         virtual ~Callback() {}
 
+        virtual void OnTCPConnClosed() = 0;
         virtual void OnTCPConnErr(const char* op, int err) = 0;
         virtual void OnTCPConnBound(const char* locIp, int locPort) = 0;
         virtual void OnTCPConnEOF() = 0;
@@ -36,19 +37,28 @@ private:
     uv_shutdown_t m_shutdown;
 
     bool m_reading;
+    bool m_readeof;
     char m_readBuf[TCPCONN_READBUF_SIZE];
 
     bool m_writing;
+    bool m_writeof;
     uv_write_t m_write;
     char m_pph[256]; // proxy protocol head, enough.
     uv_write_t m_pphWrite;
+
+    bool m_closed;
+    bool m_uvclosed;
 
     TCPConn(bool useProxyProtocol)
         : m_useProxyProtocol(useProxyProtocol)
         , m_callback(nullptr)
         , m_reading(false)
+        , m_readeof(false)
         , m_writing(false)
+        , m_writeof(false)
         , m_pph()
+        , m_closed(false)
+        , m_uvclosed(false)
     {
     }
 
@@ -99,8 +109,13 @@ public:
 
     void Close()
     {
-        uv_close((uv_handle_t*)&m_socket, on_uv_close);
-        m_callback = nullptr;
+        m_closed = true;
+        if (m_uvclosed)
+        {
+            delete this;
+            return;
+        }
+        close();
     }
 
     void StartRead()
@@ -172,6 +187,16 @@ public:
     }
 
 private:
+    void close()
+    {
+        if (uv_is_closing((uv_handle_t*)&m_socket))
+            return;
+        if (m_callback != nullptr)
+            m_callback->OnTCPConnClosed();
+        m_callback = nullptr;
+        uv_close((uv_handle_t*)&m_socket, on_uv_close);
+    }
+
     static void on_uv_connect(uv_connect_t* req, int status)
     {
         uv_stream_t* handle = req->handle;
@@ -209,7 +234,9 @@ private:
     static void on_uv_close(uv_handle_t* handle)
     {
         TCPConn* pThis = (TCPConn*)handle->data;
-        delete pThis;
+        pThis->m_uvclosed = true;
+        if (pThis->m_closed)
+            delete pThis;
     }
 
     static void on_uv_alloc(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf)
@@ -240,6 +267,9 @@ private:
         if (nread == UV_EOF)
         {
             pThis->m_callback->OnTCPConnEOF();
+            pThis->m_readeof = true;
+            if (pThis->m_writeof)
+                pThis->close();
             return;
         }
 
@@ -284,6 +314,10 @@ private:
             pThis->m_callback->OnTCPConnErr("tcp_shutdown", status);
             return;
         }
+
+        pThis->m_writeof = true;
+        if (pThis->m_readeof)
+            pThis->close();
     }
 };
 
@@ -359,6 +393,13 @@ private:
         }
 
         m_manager->JobToClean(this);
+    }
+
+    void OnTCPConnClosed() override
+    {
+        spdlog::get(PROXY_LOGGER)->info(
+            "tcp closed, client={0}:{1:d}, local={2}:{3:d}",
+            m_srcIp.c_str(), m_srcPort, m_dstIp.c_str(), m_dstPort);
     }
 
     void OnTCPConnErr(const char* op, int err) override

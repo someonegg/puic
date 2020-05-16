@@ -20,6 +20,7 @@ public:
     public:
         virtual ~Callback() {}
 
+        virtual void OnAgentConnClosed() = 0;
         virtual void OnAgentConnErr(const char* op, int err) = 0;
         virtual void OnAgentConnEOF() = 0;
         virtual void OnAgentConnRcvd(const char* data, size_t len) = 0;
@@ -35,10 +36,15 @@ private:
     Callback* m_callback;
 
     bool m_reading;
+    bool m_readeof;
     char m_readBuf[TCPCONN_READBUF_SIZE];
 
     bool m_writing;
+    bool m_writeof;
     uv_write_t m_write;
+
+    bool m_closed;
+    bool m_uvclosed;
 
     AgentConn(AgentServer &server);
     ~AgentConn();

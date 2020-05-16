@@ -91,6 +91,13 @@ private:
         m_manager.JobToClean(this);
     }
 
+    void OnAgentConnClosed() override
+    {
+        spdlog::get(PROXY_LOGGER)->info(
+            "tcp closed, client={0}:{1:d}, server={2}:{3:d}",
+            m_srcIp.c_str(), m_srcPort, m_dstIp.c_str(), m_dstPort);
+    }
+
     void OnAgentConnErr(const char* op, int err) override
     {
         spdlog::get(PROXY_LOGGER)->info(
